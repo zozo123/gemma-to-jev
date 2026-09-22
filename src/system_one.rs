@@ -14,17 +14,83 @@ const WEIGHTS_REPO: &str = "unsloth/gemma-3-4b-it-GGUF";
 const WEIGHTS_FILE: &str = "gemma-3-4b-it-Q4_K_M.gguf";
 const TOKENIZER_REPO: &str = "unsloth/gemma-3-4b-it";
 const TOKENIZER_FILE: &str = "tokenizer.json";
+const END_OF_TURN: &str = "<end_of_turn>";
 
-#[derive(Clone, Debug)]
+/// A yes/no question is answered on these two labels, so the "yes" mass is
+/// read straight off the restricted distribution.
+const NOUL_LABELS: [&str; 2] = ["no", "yes"];
+
+/// Jev exposes three question primitives. Noul is a yes/no probability, Choice
+/// selects one of N labels, Score places the state on an ordered scale.
+#[derive(Clone, Copy, Debug)]
+pub enum Primitive<'a> {
+    Noul,
+    Choice(&'a [&'a str]),
+    Score(&'a [&'a str]),
+}
+
+impl<'a> Primitive<'a> {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Primitive::Noul => "noul",
+            Primitive::Choice(_) => "choice",
+            Primitive::Score(_) => "score",
+        }
+    }
+
+    fn labels(&self) -> &'a [&'a str] {
+        match self {
+            Primitive::Noul => &NOUL_LABELS,
+            Primitive::Choice(labels) | Primitive::Score(labels) => labels,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Question<'a> {
+    pub id: &'a str,
     pub text: &'a str,
-    pub choices: &'a [&'a str],
+    pub primitive: Primitive<'a>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Decision {
-    pub selected: String,
+pub enum Value {
+    /// Probability that the answer is yes.
+    Noul(f32),
+    Choice(String),
+    /// Expected level on the ordered scale.
+    Score(f32),
+}
+
+#[derive(Clone, Debug)]
+pub struct Answer {
+    pub id: String,
+    pub text: String,
+    pub kind: &'static str,
+    pub value: Value,
     pub probabilities: Vec<(String, f32)>,
+    /// Largest probability in the restricted distribution. This is our own
+    /// shape statistic, not Jev's undisclosed calibrated confidence.
+    pub confidence: f32,
+    pub latency: Duration,
+}
+
+impl Answer {
+    pub fn rendered_value(&self) -> String {
+        match &self.value {
+            Value::Noul(probability) => {
+                let verdict = if *probability >= 0.5 { "yes" } else { "no" };
+                format!("{verdict} · p={probability:.3}")
+            }
+            Value::Choice(choice) => choice.clone(),
+            Value::Score(score) => format!("{score:.2} / {}", self.probabilities.len() - 1),
+        }
+    }
+}
+
+pub struct Baseline {
+    pub text: String,
+    pub tokens: usize,
     pub latency: Duration,
 }
 
@@ -77,76 +143,157 @@ impl SystemOne {
         })
     }
 
-    pub fn decide(
+    /// Restricted next-token distribution over the legal labels. This is the
+    /// whole System-One path: one forward pass, gather, softmax, stop.
+    pub fn label_probabilities(
         &self,
         state: &str,
         question: &str,
-        choices: &[&str],
+        labels: &[&str],
         temperature: f64,
-    ) -> Result<Decision> {
+    ) -> Result<(Vec<f32>, Duration)> {
         if !(temperature.is_finite() && temperature > 0.0) {
             bail!("temperature must be finite and greater than zero");
         }
-        if choices.len() < 2 || choices.len() > 26 {
-            bail!("choices must contain between 2 and 26 items");
+        if labels.len() < 2 || labels.len() > 26 {
+            bail!("a question needs between 2 and 26 labels");
         }
 
-        let prompt = prompt(state, question, choices);
+        let prompt = prompt(state, question, labels);
         let prompt_ids = self.encode(&prompt)?;
-        let candidate_ids = self.candidate_token_ids(&prompt, &prompt_ids, choices.len())?;
+        let candidate_ids = self.candidate_token_ids(&prompt, &prompt_ids, labels.len())?;
         let input = Tensor::new(prompt_ids.as_slice(), &self.device)?.unsqueeze(0)?;
 
-        // Clone starts with an empty KV cache. The only model operation in this
-        // path is this single forward pass: no generate/decode loop exists.
+        // Cloning gives this call an empty KV cache. The clone shares quantized
+        // weights, so it copies metadata rather than the 2.3 GB of tensors.
         let mut model = self.model.clone();
         let started = Instant::now();
         let logits = model.forward(&input, 0)?.squeeze(0)?;
         let candidate_index = Tensor::new(candidate_ids.as_slice(), &self.device)?;
-        let selected_logits = logits
+        let label_logits = logits
             .index_select(&candidate_index, 0)?
             .to_dtype(DType::F32)?
             .to_vec1::<f32>()?;
-        let probabilities = softmax(&selected_logits, temperature);
-        let latency = started.elapsed();
+        let probabilities = softmax(&label_logits, temperature);
+        Ok((probabilities, started.elapsed()))
+    }
 
-        let selected_index = probabilities
+    pub fn answer(&self, state: &str, question: &Question<'_>, temperature: f64) -> Result<Answer> {
+        let labels = question.primitive.labels();
+        let (probabilities, latency) =
+            self.label_probabilities(state, question.text, labels, temperature)?;
+
+        let best = probabilities
             .iter()
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(index, _)| index)
             .context("empty probability vector")?;
+        let confidence = probabilities[best];
 
-        Ok(Decision {
-            selected: choices[selected_index].to_string(),
-            probabilities: choices
+        let value = match question.primitive {
+            Primitive::Noul => Value::Noul(probabilities[1]),
+            Primitive::Choice(_) => Value::Choice(labels[best].to_string()),
+            // Fractional level, so a split between adjacent levels lands
+            // between them instead of snapping to one.
+            Primitive::Score(_) => Value::Score(
+                probabilities
+                    .iter()
+                    .enumerate()
+                    .map(|(level, probability)| level as f32 * probability)
+                    .sum(),
+            ),
+        };
+
+        Ok(Answer {
+            id: question.id.to_string(),
+            text: question.text.to_string(),
+            kind: question.primitive.kind(),
+            value,
+            probabilities: labels
                 .iter()
                 .zip(probabilities)
-                .map(|(choice, probability)| ((*choice).to_string(), probability))
+                .map(|(label, probability)| ((*label).to_string(), probability))
                 .collect(),
+            confidence,
             latency,
         })
     }
 
-    pub fn decide_batch(
+    /// Evaluates every question against one shared state.
+    pub fn evaluate(
         &self,
         state: &str,
         questions: &[Question<'_>],
         temperature: f64,
-    ) -> Result<Vec<Decision>> {
-        // Candle's quantized Gemma cache has no public reset API. Cheap model
-        // clones give each row an empty cache and preserve exact, unpadded
-        // prompts; this is a sequential batch API, not a fused tensor batch.
+    ) -> Result<Vec<Answer>> {
+        // Candle's quantized Gemma exposes no cache reset and no attention mask
+        // for ragged rows, so questions run sequentially. Each still costs
+        // exactly one forward pass.
         questions
             .iter()
-            .map(|question| self.decide(state, question.text, question.choices, temperature))
+            .map(|question| self.answer(state, question, temperature))
             .collect()
     }
 
-    pub fn verify_labels(&self) -> Result<Vec<(char, u32)>> {
-        let choices = ["one", "two", "three", "four", "five"];
-        let prompt = prompt("state", "question", &choices);
+    /// Ordinary autoregressive decoding, kept only as a comparison baseline.
+    /// Nothing in the System-One path calls this.
+    pub fn generate_baseline(
+        &self,
+        state: &str,
+        question: &str,
+        labels: &[&str],
+        max_tokens: usize,
+    ) -> Result<Baseline> {
+        let prompt = prompt(state, question, labels);
         let prompt_ids = self.encode(&prompt)?;
-        let ids = self.candidate_token_ids(&prompt, &prompt_ids, choices.len())?;
+        let end_of_turn = self
+            .tokenizer
+            .get_vocab(true)
+            .get(END_OF_TURN)
+            .copied()
+            .context("tokenizer is missing the end-of-turn token")?;
+
+        let mut model = self.model.clone();
+        let started = Instant::now();
+        let input = Tensor::new(prompt_ids.as_slice(), &self.device)?.unsqueeze(0)?;
+        let mut logits = model.forward(&input, 0)?.squeeze(0)?;
+        let mut generated = Vec::new();
+
+        for step in 0..max_tokens {
+            let next = logits
+                .to_dtype(DType::F32)?
+                .to_vec1::<f32>()?
+                .into_iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(token, _)| token as u32)
+                .context("empty logit vector")?;
+            if next == end_of_turn {
+                break;
+            }
+            generated.push(next);
+            let input = Tensor::new(&[next], &self.device)?.unsqueeze(0)?;
+            logits = model.forward(&input, prompt_ids.len() + step)?.squeeze(0)?;
+        }
+
+        let text = self
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(anyhow::Error::msg)?;
+        Ok(Baseline {
+            text: text.trim().to_string(),
+            tokens: generated.len(),
+            latency: started.elapsed(),
+        })
+    }
+
+    /// Confirms each label is exactly one token at the real answer boundary.
+    pub fn verify_labels(&self) -> Result<Vec<(char, u32)>> {
+        let labels = ["one", "two", "three", "four", "five"];
+        let prompt = prompt("state", "question", &labels);
+        let prompt_ids = self.encode(&prompt)?;
+        let ids = self.candidate_token_ids(&prompt, &prompt_ids, labels.len())?;
         Ok(ids
             .into_iter()
             .enumerate()
@@ -186,19 +333,17 @@ fn download(repo: &str, file: &str) -> Result<PathBuf> {
     Ok(Api::new()?.model(repo.to_string()).get(file)?)
 }
 
-fn prompt(state: &str, question: &str, choices: &[&str]) -> String {
-    let choices = choices
+fn prompt(state: &str, question: &str, labels: &[&str]) -> String {
+    let choices = labels
         .iter()
         .enumerate()
-        .map(|(index, choice)| format!("{}) {choice}", (b'A' + index as u8) as char))
+        .map(|(index, label)| format!("{}) {label}", (b'A' + index as u8) as char))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "<start_of_turn>user\n\
 You are a software incident decision classifier.\n\
 Read the state and question, compare every choice, and select the best answer.\n\
-Policy: exact retries are only useful for transient failures. A deterministic missing\n\
-library or dependency persists until the environment or dependency changes.\n\
 Reply with exactly one choice letter and nothing else.\n\n\
 State:\n{state}\n\n\
 Question:\n{question}\n\n\
@@ -226,12 +371,42 @@ fn softmax(logits: &[f32], temperature: f64) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::softmax;
+    use super::{NOUL_LABELS, Primitive, prompt, softmax};
 
     #[test]
     fn softmax_is_normalized() {
         let probabilities = softmax(&[1.0, 2.0, -1.0, 0.5, 4.0], 1.0);
         assert!((probabilities.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         assert_eq!(probabilities.len(), 5);
+    }
+
+    #[test]
+    fn temperature_flattens_the_distribution() {
+        let sharp = softmax(&[4.0, 1.0], 0.5);
+        let flat = softmax(&[4.0, 1.0], 4.0);
+        assert!(sharp[0] > flat[0]);
+        assert!((flat.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn noul_orders_no_before_yes() {
+        // Value::Noul reads index 1, so "yes" must stay second.
+        assert_eq!(NOUL_LABELS, ["no", "yes"]);
+    }
+
+    #[test]
+    fn every_primitive_exposes_labels() {
+        let levels = ["low", "medium", "high"];
+        assert_eq!(Primitive::Noul.labels().len(), 2);
+        assert_eq!(Primitive::Choice(&levels).labels().len(), 3);
+        assert_eq!(Primitive::Score(&levels).labels().len(), 3);
+    }
+
+    #[test]
+    fn prompt_ends_at_the_answer_boundary() {
+        let rendered = prompt("state", "question", &["no", "yes"]);
+        assert!(rendered.ends_with("<start_of_turn>model\n"));
+        assert!(rendered.contains("A) no"));
+        assert!(rendered.contains("B) yes"));
     }
 }

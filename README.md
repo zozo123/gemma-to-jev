@@ -1,9 +1,7 @@
 # Gemma System One
 
-Turn a small Gemma into a language-conditioned decision function. This native
-Rust demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal. The
-270M and 1B variants were faster, but failed the unchanged-retry semantic sanity
-check. The 4B model is the smallest tested size that passed the headline checks.
+Turn a small Gemma into a language-conditioned decision function, in native
+Rust. This demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal.
 
 Instead of:
 
@@ -14,10 +12,10 @@ prompt -> generate tokens -> parse text
 it does:
 
 ```text
-prompt -> one forward pass -> legal-choice logits -> softmax
+prompt -> one forward pass -> legal-label logits -> softmax -> typed answer
 ```
 
-The decision path has no autoregressive decoding, JSON, or parser.
+The decision path has no autoregressive decoding, no JSON, and no parser.
 
 ## Run
 
@@ -29,19 +27,35 @@ The first run downloads about 2.3 GB of weights and the tokenizer from Hugging
 Face. Later runs use the local Hugging Face cache.
 
 ```bash
-cargo run --release -- --repeat 10
+cargo run --release -- --repeat 5      # latency percentiles
+cargo run --release -- --stress        # determinism, order stability, spot-check
+cargo run --release -- --baseline      # compare against real generation
 cargo run --release -- --temperature 1.5
 cargo run --release -- --cpu
 ```
 
 Temperature is an inference control, not calibration.
 
+## Question primitives
+
+Following Jev's interface shape, every question is one of three types, and each
+answer carries the full restricted distribution:
+
+| Primitive | Question | Returns |
+| --- | --- | --- |
+| `noul` | Is this true? | probability of yes |
+| `choice` | Which of these options? | winning label, probabilities, confidence |
+| `score` | Where on this scale? | fractional level, probabilities, confidence |
+
+Confidence here is the largest probability in the restricted distribution. That
+is our own shape statistic, not Jev's calibrated confidence.
+
 ## How it works
 
 ```text
                   GEMMA 3 4B
 
-state + question + runtime choices
+state + question + runtime labels
                 |
                 v
         +---------------+
@@ -64,41 +78,61 @@ state + question + runtime choices
             DEPENDENCY
 ```
 
-The tokenizer is checked at runtime: each answer label must add exactly one
-token at the answer position. Softmax is applied only across those legal token
-logits.
+Each label must be exactly one token at the real answer boundary. The program
+verifies this at startup and refuses labels that tokenize any other way.
 
 ## Why this is Jev-like
 
 A conventional LLM spends inference compute producing an answer token by token.
 This demo instead asks Gemma for a discriminative decision and terminates after
-one forward pass. Natural-language state, questions, and choices stay flexible,
+one forward pass. Natural-language state, questions, and labels stay flexible,
 while the output space is constrained at runtime. This is a primitive
 System-One-style layer inspired by the same architectural idea, not an
 implementation or reproduction of TypeSafe Jev.
 
+## Measured on an Apple M1 Pro
+
+Warm, 4-bit 4B model, `--repeat 5 --stress --baseline`:
+
+| Metric | Result |
+| --- | --- |
+| Per decision | p50 403 ms · p90 413 ms · p99 415 ms |
+| Five-question evaluation | p50 2030 ms |
+| Model load (warm page cache) | 5.92 s |
+| Determinism | 5/5 identical distributions |
+| Option-order stability | 7/7 rotations kept the same decision |
+| Labelled failure-class spot-check | 4/4 |
+| System One vs `generate()` | 402 ms / 0 tokens vs 477 ms / 2 tokens |
+
+The generation baseline is only slightly slower here because it emits just two
+tokens. The saving grows with longer outputs; the structural win is that there
+is no text to parse and the output space cannot go out of range.
+
+Two findings worth keeping:
+
+- An earlier prompt contained a policy hint about retries. It pushed the model
+  toward one answer and dropped option-order stability to 20% and the spot-check
+  to 3/4. Removing it restored 100% and 4/4.
+- The very first load on a cold page cache took 19 s, and early decisions took
+  seconds before the weights became resident. Quote warm numbers only.
+
 ## Limitations
 
 - Raw softmax values are model-relative scores, not calibrated probabilities.
-- This is a 4-bit quantized 4B model, optimized for local speed over maximum
-  decision quality.
-- `decide_batch` currently preserves exact unpadded prompts by evaluating rows
-  sequentially; a fused padded batch needs attention-mask support in Candle's
-  quantized Gemma path.
-- Production Jev-like behavior needs a calibration set, temperature scaling,
-  Brier loss/ECE measurement, and decision-specific fine-tuning.
+  The model frequently reports 100%, which reflects a peaked distribution rather
+  than certainty about the world.
+- On the demo incident, the model answers `yes` to retrying an unchanged
+  command, which is wrong for a deterministic missing library. Option-order
+  testing confirms this is a genuine model judgment, not position bias.
+- It routes a missing `-lssl` to the security team, which is defensible but
+  debatable.
+- `evaluate` runs questions sequentially. Candle's quantized Gemma exposes no
+  cache reset and no ragged attention mask, so fused batching needs upstream
+  support.
 
 ## Next
 
 - fuse question batches with a correct padding attention mask
-- reuse shared-state KV prefill
-- calibrate on held-out decisions
-- distill from a larger reasoning model
-
-## Measured on Apple M1 Pro
-
-With the model cached and `--repeat 3`, the 4B Q4_K_M model selected
-`dependency` for the linker failure and `no` for an unchanged retry. A final
-five-run check measured median warm latency of 2.78 seconds for five sequential
-questions, or 556 ms per question. These numbers are measurements from one
-machine, not estimates.
+- reuse shared-state KV prefill across questions
+- calibrate on held-out decisions, then measure ECE and Brier score
+- fine-tune on decision data instead of prompting a general chat model
