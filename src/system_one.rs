@@ -9,10 +9,10 @@ use candle_transformers::models::quantized_gemma3::ModelWeights;
 use hf_hub::api::sync::Api;
 use tokenizers::Tokenizer;
 
-pub const MODEL_ID: &str = "google/gemma-3-1b-it";
-const WEIGHTS_REPO: &str = "unsloth/gemma-3-1b-it-GGUF";
-const WEIGHTS_FILE: &str = "gemma-3-1b-it-Q4_K_M.gguf";
-const TOKENIZER_REPO: &str = "unsloth/gemma-3-1b-it";
+pub const MODEL_ID: &str = "google/gemma-3-4b-it";
+const WEIGHTS_REPO: &str = "unsloth/gemma-3-4b-it-GGUF";
+const WEIGHTS_FILE: &str = "gemma-3-4b-it-Q4_K_M.gguf";
+const TOKENIZER_REPO: &str = "unsloth/gemma-3-4b-it";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 
 #[derive(Clone, Debug)]

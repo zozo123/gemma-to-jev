@@ -131,7 +131,7 @@ fn questions() -> Vec<Question<'static>> {
 
 fn banner() {
     println!("==============================================================");
-    println!(" GEMMA 3 1B -> SYSTEM ONE (native Rust)");
+    println!(" GEMMA 3 4B -> SYSTEM ONE (native Rust)");
     println!(" prompt -> one forward pass -> choice logits -> softmax");
     println!(" no generate(), no JSON, no parser");
     println!("==============================================================\n");

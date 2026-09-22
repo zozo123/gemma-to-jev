@@ -1,9 +1,9 @@
 # Gemma System One
 
 Turn a small Gemma into a language-conditioned decision function. This native
-Rust demo uses `google/gemma-3-1b-it` (Q4_K_M) with Candle on Apple Metal. The
-270M model was tested first but failed the semantic sanity checks; 1B is the
-smallest tested size that produced a credible demo.
+Rust demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal. The
+270M and 1B variants were faster, but failed the unchanged-retry semantic sanity
+check. The 4B model is the smallest tested size that passed the headline checks.
 
 Instead of:
 
@@ -25,7 +25,7 @@ The decision path has no autoregressive decoding, JSON, or parser.
 cargo run --release
 ```
 
-The first run downloads about 800 MB of weights and the tokenizer from Hugging
+The first run downloads about 2.3 GB of weights and the tokenizer from Hugging
 Face. Later runs use the local Hugging Face cache.
 
 ```bash
@@ -39,7 +39,7 @@ Temperature is an inference control, not calibration.
 ## How it works
 
 ```text
-                  GEMMA 3 1B
+                  GEMMA 3 4B
 
 state + question + runtime choices
                 |
@@ -80,7 +80,7 @@ implementation or reproduction of TypeSafe Jev.
 ## Limitations
 
 - Raw softmax values are model-relative scores, not calibrated probabilities.
-- This is a 4-bit quantized 1B model, optimized for local speed over maximum
+- This is a 4-bit quantized 4B model, optimized for local speed over maximum
   decision quality.
 - `decide_batch` currently preserves exact unpadded prompts by evaluating rows
   sequentially; a fused padded batch needs attention-mask support in Candle's
@@ -94,3 +94,11 @@ implementation or reproduction of TypeSafe Jev.
 - reuse shared-state KV prefill
 - calibrate on held-out decisions
 - distill from a larger reasoning model
+
+## Measured on Apple M1 Pro
+
+With the model cached and `--repeat 3`, the 4B Q4_K_M model selected
+`dependency` for the linker failure and `no` for an unchanged retry. A final
+five-run check measured median warm latency of 2.78 seconds for five sequential
+questions, or 556 ms per question. These numbers are measurements from one
+machine, not estimates.
