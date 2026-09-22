@@ -1,0 +1,56 @@
+{
+  "benchmark": "fstandhartinger/jevbench",
+  "benchmark_revision": "v1.3.0",
+  "dataset_hash": "dc3995d8ae1e2fc8e81ce38431add509eb8bb39b85aadfd0c7c32079382dde51",
+  "scope": "all 231 redistributable public tasks; no hidden tasks",
+  "model": "google/gemma-3-4b-it Q4_K_M",
+  "runtime": "Candle Metal",
+  "hardware": "Apple M1 Pro",
+  "api": "TypeSafe-compatible POST /v1/systemone",
+  "accuracy": {
+    "overall": 0.5887445887445888,
+    "macro_family": 0.5534186091590633,
+    "easy": {
+      "correct": 48,
+      "total": 48,
+      "value": 1.0
+    },
+    "standard_public": {
+      "correct": 45,
+      "total": 72,
+      "value": 0.625
+    },
+    "hard_public": {
+      "correct": 43,
+      "total": 111,
+      "value": 0.38738738738738737
+    }
+  },
+  "calibration": {
+    "brier_mean": 0.8082320391870655,
+    "ece": 0.40192168546461804,
+    "ordinal_mae": 0.7816893598725203
+  },
+  "latency_seconds": {
+    "p50": 0.5931627920363098,
+    "p95": 16.560829708527308,
+    "note": "Serial fresh-state requests; long-context tasks dominate p95. This is not the shared-state 47 ms path."
+  },
+  "reliability": {
+    "attempted": 231,
+    "valid": 231,
+    "schema_validity": 1.0,
+    "operational_success": 1.0
+  },
+  "paraphrase_consistency": {
+    "agreement": 0.7777777777777778,
+    "pairs": 36
+  },
+  "comparison_on_same_231_public_task_ids": {
+    "gemma_system_one": 0.5887445887445888,
+    "laya": 0.5844155844155844,
+    "kev_4b": 0.6623376623376623,
+    "jev_1_13_0": 0.8658008658008658,
+    "note": "Reference outcomes are from JevBench's published v1.2 per-task artifact. This is a public-subset comparison, not an official leaderboard rank."
+  }
+}

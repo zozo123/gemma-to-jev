@@ -17,10 +17,10 @@ prompt -> generate tokens -> parse text
 it does:
 
 ```text
-prompt -> one forward pass -> legal-label logits -> softmax -> typed answer
+prompt -> legal-label logits -> softmax -> typed answer
 ```
 
-The decision path has no autoregressive decoding, no JSON, and no parser.
+The decision path has no open-ended generation, generated JSON, or parser.
 
 ## Run
 
@@ -28,6 +28,7 @@ The decision path has no autoregressive decoding, no JSON, and no parser.
 cargo run --release                 # conference demo (default)
 cargo run --release -- demo
 cargo run --release -- bench        # warm latency, baseline, stress
+cargo run --release -- serve        # local TypeSafe-compatible API
 ```
 
 The first run downloads about 2.3 GB of weights and the tokenizer from Hugging
@@ -42,6 +43,50 @@ cargo run --release -- --cpu demo
 ```
 
 Temperature is an inference control, not calibration.
+
+## Use it inside an agent harness
+
+`serve` loads Gemma once and exposes `POST /v1/systemone`, matching the
+TypeSafe request/response shape. It binds to `127.0.0.1:8080` by default.
+
+```bash
+cargo run --release -- serve
+
+curl http://127.0.0.1:8080/v1/systemone \
+  -H 'content-type: application/json' \
+  -d '{
+    "state": "The build failed with: ld: library not found for -lssl",
+    "questions": {
+      "route": {
+        "type": "choice",
+        "instructions": "Choose the next owner.",
+        "criteria": {
+          "build": "Build or linker failure",
+          "security": "Security incident",
+          "remote_llm": "Needs deeper investigation"
+        }
+      }
+    }
+  }'
+```
+
+The intended production shape is a local sidecar, not an in-process benchmark
+dependency:
+
+```text
+event -> local System One -> typed route / policy / escalation decision
+                             | high-trust allowlisted case: act locally
+                             ` otherwise: call the remote LLM
+```
+
+Run it **before** a remote model when saving calls matters. Run both
+speculatively when latency matters, but cancellation may not save provider cost.
+Do not gate on this model's raw confidence alone: JevBench shows that it is
+overconfident. Gate only task families validated for the application, and send
+ambiguous, adversarial, long-policy, or multi-hop work to the remote model.
+
+Single-question requests use the direct logit path. Multi-question requests use
+the shared-state sheet and batched pointer path automatically.
 
 ## Result at a glance
 
@@ -171,13 +216,38 @@ between runs (509–804 ms observed). The saving grows with longer outputs; the
 structural win is that there is no text to parse and the output space cannot go
 out of range.
 
-### JevBench scope
+### JevBench: all 231 public decisions
 
-[jevbench.dev](https://jevbench.dev/) currently benchmarks decision models in
-interactive StarCraft II agent runs (win/loss, task completion, latency), not
-standalone text decisions. This repository therefore does not claim a
-JevBench.dev score. Its reproducible local checks report latency, throughput,
-determinism, option-order stability, and labelled classification accuracy.
+The TypeSafe-compatible server was run through the official
+[fstandhartinger/jevbench](https://github.com/fstandhartinger/jevbench) v1.3.0
+adapter, serially, on every redistributable public task. These are fresh-state
+requests, so they measure a different workload from the 47 ms shared-state
+batch above.
+
+| Metric | Result |
+| --- | --- |
+| Accuracy | **58.9%** · 136/231 |
+| Easy | **100%** · 48/48 |
+| Standard public | **62.5%** · 45/72 |
+| Hard public | **38.7%** · 43/111 |
+| Macro family accuracy | 55.3% |
+| ECE / Brier | 0.402 / 0.808 |
+| API and schema validity | 231/231 |
+| Fresh-state latency | p50 593 ms · p95 16.6 s |
+
+On the exact same 231 public task IDs, JevBench's published outcomes are Laya
+58.4%, kev-4B 66.2%, and Jev 1.13.0 86.6%. This prompted Gemma barely clears
+Laya, but it is not competitive with a trained decision model. The p95 is
+dominated by long-context policy and multi-hop cases.
+
+This is not an official leaderboard rank: no hidden set was run, and hardware
+differs. The compact result artifact is in
+[`bench/results/jevbench-v1.3-public.json`](bench/results/jevbench-v1.3-public.json).
+Reproduce it while `serve` is running:
+
+```bash
+./bench/run_jevbench.sh
+```
 
 Two findings worth keeping:
 
@@ -207,7 +277,7 @@ Two findings worth keeping:
 
 ## Next
 
-- calibrate on held-out decisions, then measure ECE and Brier score
-- fine-tune on decision data instead of prompting a general chat model
+- calibrate on held-out decisions; current JevBench ECE is 0.402
+- fine-tune on decision data; prompting alone reaches only 58.9% public accuracy
 - a faster quantized matmul: 47 ms for one 4B pass is roughly 8x off this
   machine's memory bandwidth, so the kernel is the remaining ceiling

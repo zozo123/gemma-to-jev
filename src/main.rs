@@ -1,3 +1,4 @@
+mod api;
 mod quantized_gemma3;
 mod system_one;
 
@@ -81,6 +82,12 @@ struct Args {
 enum Command {
     /// Conference demo: typed answers, distributions, confidence gate.
     Demo,
+    /// Run a local TypeSafe-compatible API for JevBench or agent preflight.
+    Serve {
+        /// Address for the local HTTP server.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+    },
     /// Warm latency percentiles, generation baseline, and stress suite.
     Bench {
         /// Warm evaluations of the five-question set after the first inference.
@@ -116,6 +123,7 @@ fn main() -> Result<()> {
 
     match command {
         Command::Demo => demo(&engine, args.temperature)?,
+        Command::Serve { listen } => api::serve(&engine, &listen, args.temperature)?,
         Command::Bench {
             repeat,
             skip_baseline,

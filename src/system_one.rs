@@ -584,7 +584,7 @@ fn download(repo: &str, file: &str) -> Result<PathBuf> {
 fn prefix_text(state: &str) -> String {
     format!(
         "<start_of_turn>user\n\
-You are a software incident decision classifier.\n\
+You are a precise decision classifier.\n\
 Read the state and question, compare every choice, and select the best answer.\n\
 Reply with exactly one choice letter and nothing else.\n\n\
 State:\n{state}\n\n"
@@ -614,7 +614,7 @@ fn prompt(state: &str, question: &str, labels: &[&str]) -> String {
 fn sheet_text(state: &str, questions: &[Question<'_>]) -> String {
     let mut sheet = String::from(
         "<start_of_turn>user\n\
-You are a software incident decision classifier.\n\
+You are a precise decision classifier.\n\
 Read the state, then answer every numbered question with one choice letter.\n\n",
     );
     sheet.push_str(&format!("State:\n{state}\n\n"));

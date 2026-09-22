@@ -138,6 +138,8 @@
     <div class="links">
       <a href="#method">Method</a>
       <a href="#proof">Proof</a>
+      <a href="#jevbench">JevBench</a>
+      <a href="#sidecar">Sidecar</a>
       <a href="https://github.com/zozo123/gemma-to-jev">GitHub</a>
     </div>
   </nav>
@@ -231,13 +233,51 @@ softmax → typed decision</pre>
       <div class="failure"><strong>Not Jev.</strong> This reproduces Jev's typed interface and no-generation inference shape. It does not reproduce TypeSafe's model, RLCD training, calibration, or hosted infrastructure.</div>
     </section>
 
+    <section id="jevbench" aria-labelledby="jevbench-title">
+      <h2 id="jevbench-title">231 decisions. No victory lap.</h2>
+      <div class="measurements">
+        <div class="metric"><strong>58.9%</strong><span>public accuracy · 136/231</span></div>
+        <div class="metric"><strong>100%</strong><span>easy · 48/48</span></div>
+        <div class="metric"><strong>38.7%</strong><span>hard public · 43/111</span></div>
+        <div class="metric"><strong>0.402</strong><span>ECE · overconfident</span></div>
+      </div>
+      <p>Official JevBench v1.3 adapter, every redistributable public task, 231/231 valid responses. On those exact task IDs: Laya 58.4%, kev-4B 66.2%, Jev 1.13.0 86.6%. Prompted Gemma is a useful local baseline, not a trained decision model. This public-only run is not an official leaderboard rank.</p>
+      <p>Fresh-state API latency was p50 593 ms and p95 16.6 s; long-context tasks dominate the tail. That workload is deliberately separate from the 47 ms shared-state batch above.</p>
+    </section>
+
+    <section id="sidecar" aria-labelledby="sidecar-title">
+      <h2 id="sidecar-title">Put it before the expensive model.</h2>
+      <div class="pipeline">
+        <div class="path good">
+          <h3>Local sidecar</h3>
+          <pre>agent event
+      ↓
+POST /v1/systemone
+      ↓
+route · policy · escalate</pre>
+        </div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="path bad">
+          <h3>Remote fallback</h3>
+          <pre>uncertain or complex
+      ↓
+remote LLM
+      ↓
+reason · generate · act</pre>
+        </div>
+      </div>
+      <p>The server speaks TypeSafe's request/response shape, so JevBench and an agent harness use the same API. Route only application-validated cases locally; raw softmax confidence is not a safe escalation policy.</p>
+    </section>
+
     <section aria-labelledby="run">
       <h2 id="run">Run the instrument</h2>
       <pre class="terminal"><span class="command">git clone https://github.com/zozo123/gemma-to-jev
 cd gemma-to-jev
 cargo run --release</span>                 # conference demo
 
-<span class="command">cargo run --release -- bench</span>        # latency + proof suite</pre>
+<span class="command">cargo run --release -- bench</span>        # latency + proof suite
+<span class="command">cargo run --release -- serve</span>        # local TypeSafe-compatible API
+<span class="command">./bench/run_jevbench.sh</span>              # official 231-task public run</pre>
       <p>The first run downloads about 2.3 GB of weights. Metal is selected automatically; pass <code>--cpu</code> to force CPU.</p>
     </section>
   </main>
