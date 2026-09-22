@@ -1,0 +1,9 @@
+/target/
+/models/
+.cache/
+.env
+.env.*
+*.token
+*.key
+huggingface/
+.DS_Store
