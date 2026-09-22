@@ -3,6 +3,8 @@
 Turn a small Gemma into a language-conditioned decision function, in native
 Rust. This demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal.
 
+Project page: <https://zozo123.github.io/gemma-to-jev/>
+
 Instead of:
 
 ```text
@@ -96,17 +98,18 @@ Warm, 4-bit 4B model, `--repeat 5 --stress --baseline`:
 
 | Metric | Result |
 | --- | --- |
-| Per decision | p50 403 ms · p90 413 ms · p99 415 ms |
-| Five-question evaluation | p50 2030 ms |
-| Model load (warm page cache) | 5.92 s |
+| Per decision | p50 401 ms · p90 414 ms · p99 419 ms |
+| Five-question evaluation | p50 2020 ms |
+| Model load (warm page cache) | 5.9 – 8.4 s |
 | Determinism | 5/5 identical distributions |
 | Option-order stability | 7/7 rotations kept the same decision |
 | Labelled failure-class spot-check | 4/4 |
-| System One vs `generate()` | 402 ms / 0 tokens vs 477 ms / 2 tokens |
+| System One vs `generate()` | 408 ms / 0 tokens vs 804 ms / 2 tokens |
 
-The generation baseline is only slightly slower here because it emits just two
-tokens. The saving grows with longer outputs; the structural win is that there
-is no text to parse and the output space cannot go out of range.
+The generation baseline emits only two tokens, so the gap is modest and varies
+between runs (477–804 ms observed). The saving grows with longer outputs; the
+structural win is that there is no text to parse and the output space cannot go
+out of range.
 
 Two findings worth keeping:
 
