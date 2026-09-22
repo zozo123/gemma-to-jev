@@ -5,8 +5,8 @@ Rust. This demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal.
 
 Project page: <https://zozo123.github.io/gemma-to-jev/>
 
-> **Measured: 47 ms per warm decision, 21.2 decisions/s, 4/4 labelled
-> spot-check, 7/7 option-order stability — on an Apple M1 Pro.**
+> **Measured: 47 ms per warm decision, 21.2 decisions/s, 7/7 option-order
+> stability — on an Apple M1 Pro. 58.9% on JevBench's 231 public decisions.**
 
 Instead of:
 
@@ -198,18 +198,27 @@ Warm, 4-bit 4B model, `cargo run --release -- bench --repeat 2 --skip-baseline`:
 | Sheet prefill (state + 5 questions) | 232 tokens · ~0.6 s, paid once |
 | Determinism | 5/5 identical distributions |
 | Option-order stability | 7/7 rotations kept the same decision |
-| Labelled spot-check, full prompt | 4/4 |
+| Labelled spot-check, full prompt | 3/4 |
 | Labelled spot-check, fast sheet path | 4/4 |
 | System One vs `generate()` | 420 ms / 0 tokens vs 509 ms / 2 tokens |
 
-The fast path is checked against the slow one on every `bench` run, not assumed.
-All five discrete decisions are identical across the full-prompt, serial-sheet,
-and batched-sheet paths. The only measured difference anywhere is the
-`retry_risk` fractional score, which lands at 1.01 or 1.03 on a 0–4 scale
-depending on the path — the same level, from a distribution split slightly
-differently. Single-position steps skip the sliding-window mask, which is what
-upstream Candle already does when decoding, and is the likely source of that
-small numeric drift.
+The fast path is checked against the slow one on every `bench` run, not assumed,
+and it does not fully agree. Four of the five discrete decisions match across the
+full-prompt, serial-sheet, and batched-sheet paths. The fifth, the `retry_risk`
+score, lands at 3.00 on the full prompt and 1.08 on the sheet — high risk versus
+low risk on a 0–4 scale, which is a different answer, not rounding. Reading a
+question from a cached sheet is therefore not equivalent to asking it on its own,
+and anything depending on that question should use the full-prompt path.
+
+The remaining drift between serial and batched sheet reads is small (1.08 versus
+1.14 on the same score). Single-position steps skip the sliding-window mask,
+which is what upstream Candle already does when decoding, and is the likely
+source of that numeric difference.
+
+On the four-case labelled spot-check the two paths also disagree in the other
+direction: the sheet path gets 4/4 while the full prompt gets 3/4, missing an
+`infrastructure` case it calls `test`. Four cases decide nothing; both numbers
+are too small to rank the paths.
 
 The generation baseline emits only two tokens, so the gap is modest and varies
 between runs (509–804 ms observed). The saving grows with longer outputs; the

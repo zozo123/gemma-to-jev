@@ -164,7 +164,7 @@
       <div class="measurements">
         <div class="metric"><strong>47 ms</strong><span>p50, warm batched sheet</span></div>
         <div class="metric"><strong>21.2/s</strong><span>five decisions per batch</span></div>
-        <div class="metric"><strong>4/4</strong><span>labelled failure-class check</span></div>
+        <div class="metric"><strong>4/4</strong><span>fast-path failure-class check</span></div>
         <div class="metric"><strong>7/7</strong><span>option rotations held</span></div>
       </div>
       <p>Measured locally—not extrapolated—using a quantized 4B model on Apple Metal. The sheet prefill is about 0.6 seconds and is paid once per state. A fresh one-question request is not 47 ms.</p>
@@ -213,18 +213,19 @@ softmax → typed decision</pre>
         <div>
           <h3>What held</h3>
           <ul>
-            <li>4/4 full-prompt labelled spot-check</li>
             <li>4/4 fast-sheet labelled spot-check</li>
             <li>7/7 option-order rotations</li>
             <li>5/5 deterministic distributions</li>
-            <li>All five discrete decisions unchanged</li>
+            <li>4/5 decisions match the slow path</li>
           </ul>
         </div>
         <div class="warning">
           <h3>What did not</h3>
           <ul>
+            <li>The sheet path reads <code>retry_risk</code> as 1.08 where the full prompt reads 3.00—low risk versus high risk.</li>
             <li>A one-token pointer reached 27 ms—and collapsed accuracy to 1/4.</li>
             <li>Long-suffix batching was slower than serial.</li>
+            <li>The full-prompt spot-check is 3/4, not 4/4.</li>
             <li>Raw softmax remains uncalibrated.</li>
             <li>The model still wrongly recommends an unchanged retry.</li>
           </ul>
