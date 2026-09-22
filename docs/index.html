@@ -3,265 +3,249 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gemma System One — an LLM as a decision function</title>
-<meta name="description" content="Turning Gemma 3 4B from a text generator into a language-conditioned decision function: one forward pass, choice logits, softmax. No generate(), no parser.">
+<meta name="theme-color" content="#ecebe4">
+<title>Gemma System One — 47 ms decisions from a 4B model</title>
+<meta name="description" content="A native Rust experiment that turns Gemma 3 4B into a typed decision function: 47 ms per warm decision, 21.2 decisions/s, no generated text.">
 <style>
   :root {
-    --ink: #0c0d10;
-    --panel: #14161b;
-    --line: #262a33;
-    --text: #d7dae0;
-    --dim: #8b919d;
-    --amber: #e8a24a;
-    --green: #5ccb8a;
-    --red: #e06a5a;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --paper: #ecebe4;
+    --paper-2: #f7f6f0;
+    --ink: #141414;
+    --muted: #62615d;
+    --line: #c9c7bd;
+    --blue: #1848d4;
+    --red: #c63b2f;
+    --green: #19704b;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    --sans: Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
     margin: 0;
-    background: var(--ink);
-    color: var(--text);
-    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background:
+      linear-gradient(rgba(20,20,20,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(20,20,20,.045) 1px, transparent 1px),
+      var(--paper);
+    background-size: 24px 24px;
+    font: 17px/1.58 var(--sans);
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
-  a { color: var(--amber); }
-
-  header { padding: 88px 0 56px; border-bottom: 1px solid var(--line); }
-  .kicker {
-    font-family: var(--mono); font-size: 12px; letter-spacing: .22em;
-    text-transform: uppercase; color: var(--amber); margin: 0 0 20px;
+  a { color: var(--blue); text-underline-offset: 3px; }
+  a:focus-visible { outline: 3px solid var(--red); outline-offset: 4px; }
+  .page { max-width: 1120px; margin: auto; padding: 0 32px; }
+  .rail { border-left: 1px solid var(--ink); padding-left: 32px; }
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 22px 0; border-bottom: 1px solid var(--ink);
+    font: 13px/1 var(--mono);
+  }
+  nav a { color: var(--ink); text-decoration: none; }
+  nav .links { display: flex; gap: 22px; }
+  header {
+    min-height: 72vh; display: grid; grid-template-columns: 1.25fr .75fr;
+    gap: 64px; align-items: center; padding: 74px 0 64px;
+    border-bottom: 1px solid var(--ink);
   }
   h1 {
-    font-family: var(--mono); font-size: clamp(30px, 5.2vw, 50px);
-    line-height: 1.1; letter-spacing: -.02em; margin: 0 0 20px; font-weight: 600;
+    margin: 0 0 28px; max-width: 12ch;
+    font-size: clamp(52px, 8vw, 104px); line-height: .88;
+    letter-spacing: -.065em; font-weight: 750;
   }
-  .lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--dim); max-width: 60ch; margin: 0; }
-  .lede strong { color: var(--text); font-weight: 600; }
-
+  .lede { max-width: 56ch; margin: 0; color: var(--muted); font-size: 20px; }
+  .reading {
+    background: var(--blue); color: white; padding: 28px;
+    transform: rotate(1.2deg); box-shadow: 10px 10px 0 var(--ink);
+  }
+  .reading strong {
+    display: block; font: 700 clamp(72px, 11vw, 132px)/.8 var(--mono);
+    letter-spacing: -.09em;
+  }
+  .reading span { display: block; margin-top: 20px; font: 15px/1.4 var(--mono); }
+  .trace { display: block; width: 100%; height: 54px; margin-top: 24px; }
+  section { padding: 72px 0; border-bottom: 1px solid var(--ink); }
   h2 {
-    font-family: var(--mono); font-size: 13px; letter-spacing: .2em;
-    text-transform: uppercase; color: var(--amber);
-    margin: 0 0 24px; padding-top: 4px;
+    margin: 0 0 36px; font-size: clamp(31px, 4vw, 52px);
+    line-height: 1.02; letter-spacing: -.04em;
   }
-  section { padding: 56px 0; border-bottom: 1px solid var(--line); }
+  h3 { margin: 0 0 10px; font-size: 19px; }
   p { max-width: 68ch; }
-  .muted { color: var(--dim); }
-
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 680px) { .split { grid-template-columns: 1fr; } }
-  .pipe {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 20px 22px; font-family: var(--mono); font-size: 13px; line-height: 2;
+  .measurements {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    border: 1px solid var(--ink); background: var(--paper-2);
   }
-  .pipe h3 {
-    font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
-    margin: 0 0 14px; color: var(--dim); font-weight: 600;
+  .metric { padding: 24px; border-right: 1px solid var(--ink); }
+  .metric:last-child { border: 0; }
+  .metric strong { display: block; font: 700 32px/1 var(--mono); color: var(--blue); }
+  .metric span { display: block; margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .pipeline { display: grid; grid-template-columns: 1fr 64px 1fr; align-items: stretch; }
+  .path { padding: 28px; border: 1px solid var(--ink); background: var(--paper-2); }
+  .path.bad { color: var(--muted); }
+  .path.good { border-width: 3px; border-color: var(--blue); }
+  .path pre { margin: 16px 0 0; white-space: pre-wrap; font: 14px/1.85 var(--mono); }
+  .arrow { display: grid; place-items: center; font: 28px var(--mono); }
+  .steps { counter-reset: step; display: grid; gap: 0; }
+  .step {
+    counter-increment: step; display: grid; grid-template-columns: 80px 1fr 120px;
+    gap: 28px; align-items: baseline; padding: 26px 0; border-top: 1px solid var(--line);
   }
-  .pipe.after { border-color: #3b3320; }
-  .pipe.after h3 { color: var(--amber); }
-  .pipe .step { color: var(--dim); }
-  .pipe .hot { color: var(--text); }
-  .pipe .kill { color: var(--red); text-decoration: line-through; }
-  .pipe .win { color: var(--green); }
-
-  table { width: 100%; border-collapse: collapse; font-size: 15px; }
-  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); }
-  th { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
-  td.num { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-  td.kind { font-family: var(--mono); color: var(--amber); font-size: 13px; }
-
-  .answer { margin-bottom: 30px; }
-  .answer .q { font-size: 15px; margin: 0 0 4px; }
-  .answer .verdict { font-family: var(--mono); color: var(--green); font-size: 15px; margin: 0 0 12px; }
-  .answer .verdict .conf { color: var(--dim); }
-  .bar-row { display: grid; grid-template-columns: 150px 1fr 62px; gap: 12px; align-items: center; font-family: var(--mono); font-size: 12.5px; margin-bottom: 5px; }
-  .bar-row .label { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
-  .track { background: #1b1e25; border-radius: 2px; height: 9px; overflow: hidden; }
-  .fill { background: var(--amber); height: 100%; border-radius: 2px; }
-  .fill.lead { background: var(--green); }
-  .bar-row .pct { text-align: right; color: var(--text); }
-
-  pre {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 18px 20px; overflow-x: auto; font-family: var(--mono);
-    font-size: 13px; line-height: 1.7; color: var(--text); margin: 0;
+  .step::before { content: "0" counter(step); font: 15px var(--mono); color: var(--blue); }
+  .step .time { text-align: right; font: 700 22px var(--mono); }
+  .proof { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .proof > div { border-top: 4px solid var(--green); padding-top: 18px; }
+  .proof .warning { border-color: var(--red); }
+  .proof ul { padding-left: 20px; color: var(--muted); }
+  .proof li { margin: 8px 0; }
+  .terminal {
+    margin: 0; padding: 28px; overflow-x: auto;
+    color: #e8e8e8; background: var(--ink); border-left: 8px solid var(--blue);
+    font: 14px/1.75 var(--mono);
   }
-  code { font-family: var(--mono); font-size: .92em; }
-  p code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
-
-  .note {
-    border-left: 2px solid var(--amber); background: #17150f;
-    padding: 16px 20px; border-radius: 0 6px 6px 0; margin: 0 0 18px;
+  .command { color: #9eb6ff; }
+  .failure {
+    margin-top: 30px; padding: 20px 24px; border: 1px solid var(--red);
+    background: rgba(198,59,47,.06);
   }
-  .note h3 { font-size: 15px; margin: 0 0 8px; }
-  .note p { margin: 0; color: var(--dim); }
-  .note.bad { border-left-color: var(--red); background: #191110; }
-
-  ul { padding-left: 18px; max-width: 68ch; }
-  li { margin-bottom: 10px; color: var(--dim); }
-  li strong { color: var(--text); font-weight: 600; }
-
-  .cta { display: inline-block; font-family: var(--mono); font-size: 14px;
-    border: 1px solid var(--amber); color: var(--amber); padding: 11px 20px;
-    border-radius: 6px; text-decoration: none; margin-top: 8px; }
-  .cta:hover { background: var(--amber); color: var(--ink); }
-
-  footer { padding: 40px 0 72px; color: var(--dim); font-size: 14px; }
+  .failure strong { color: var(--red); }
+  footer { padding: 38px 0 72px; display: flex; justify-content: space-between; font-size: 14px; }
+  @media (max-width: 800px) {
+    .page { padding: 0 20px; }
+    .rail { padding-left: 20px; }
+    header { grid-template-columns: 1fr; min-height: 0; gap: 44px; }
+    .measurements { grid-template-columns: 1fr 1fr; }
+    .metric:nth-child(2) { border-right: 0; }
+    .metric:nth-child(-n+2) { border-bottom: 1px solid var(--ink); }
+    .pipeline, .proof { grid-template-columns: 1fr; }
+    .arrow { min-height: 56px; transform: rotate(90deg); }
+    .step { grid-template-columns: 44px 1fr; }
+    .step .time { grid-column: 2; text-align: left; }
+  }
+  @media (max-width: 480px) {
+    nav .links a:first-child { display: none; }
+    .measurements { grid-template-columns: 1fr; }
+    .metric { border-right: 0; border-bottom: 1px solid var(--ink); }
+    .metric:nth-child(3) { border-bottom: 1px solid var(--ink); }
+    footer { display: block; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 </style>
 </head>
 <body>
+<div class="page">
+  <nav>
+    <a href="#top">Gemma System One / lab note 0.2</a>
+    <div class="links">
+      <a href="#method">Method</a>
+      <a href="#proof">Proof</a>
+      <a href="https://github.com/zozo123/gemma-to-jev">GitHub</a>
+    </div>
+  </nav>
 
-<header>
-  <div class="wrap">
-    <p class="kicker">Gemma 3 4B · native Rust · Apple Metal</p>
-    <h1>The LLM became<br>a decision function.</h1>
-    <p class="lede">Normally Gemma talks. Here, talking is removed from the hot path. The model reads a state and a question, performs <strong>one forward pass</strong>, and we read only the logits for the legal answers. No decoding. No JSON. No parser.</p>
-  </div>
-</header>
+  <header id="top">
+    <div>
+      <h1>The LLM stopped talking.</h1>
+      <p class="lede">Gemma 3 4B now acts as a language-conditioned decision function in native Rust. One shared prefill. One batched logit read. No generated answer, JSON, or parser.</p>
+    </div>
+    <div class="reading" aria-label="Measured median: 47 milliseconds per decision">
+      <strong>47</strong>
+      <span>milliseconds / warm decision<br>21.2 decisions / second<br>Apple M1 Pro · Q4_K_M</span>
+      <svg class="trace" viewBox="0 0 320 54" role="img" aria-label="Five decision pulses">
+        <path d="M0 42H30V12H38V42H91V12H99V42H152V12H160V42H213V12H221V42H274V12H282V42H320" fill="none" stroke="white" stroke-width="3"/>
+      </svg>
+    </div>
+  </header>
 
-<section>
-  <div class="wrap">
-    <h2>What changed</h2>
-    <div class="split">
-      <div class="pipe">
-        <h3>Normal LLM</h3>
-        <div class="step">state + question</div>
-        <div class="step">↓</div>
-        <div class="hot">Gemma</div>
-        <div class="step">↓</div>
-        <div class="kill">generate()</div>
-        <div class="kill">token → token → token</div>
-        <div class="kill">JSON / text</div>
-        <div class="kill">parser</div>
+  <main class="rail">
+    <section aria-labelledby="numbers">
+      <h2 id="numbers">The measured result</h2>
+      <div class="measurements">
+        <div class="metric"><strong>47 ms</strong><span>p50, warm batched sheet</span></div>
+        <div class="metric"><strong>21.2/s</strong><span>five decisions per batch</span></div>
+        <div class="metric"><strong>4/4</strong><span>labelled failure-class check</span></div>
+        <div class="metric"><strong>7/7</strong><span>option rotations held</span></div>
       </div>
-      <div class="pipe after">
-        <h3>System One</h3>
-        <div class="step">state + question + runtime labels</div>
-        <div class="step">↓</div>
-        <div class="hot">Gemma</div>
-        <div class="step">↓</div>
-        <div class="hot">logits</div>
-        <div class="step">↓</div>
-        <div class="hot">select legal-label logits</div>
-        <div class="win">softmax → probability vector</div>
+      <p>Measured locally—not extrapolated—using a quantized 4B model on Apple Metal. The sheet prefill is about 0.6 seconds and is paid once per state. A fresh one-question request is not 47 ms.</p>
+    </section>
+
+    <section id="method" aria-labelledby="change">
+      <h2 id="change">Same transformer. Different exit.</h2>
+      <div class="pipeline">
+        <div class="path bad">
+          <h3>Normal LLM</h3>
+          <pre>state + question
+      ↓
+generate()
+      ↓
+token → token → token
+      ↓
+text → parser → maybe valid</pre>
+        </div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="path good">
+          <h3>System-One-style</h3>
+          <pre>state + question sheet
+      ↓
+shared KV prefill
+      ↓
+legal-label logits
+      ↓
+softmax → typed decision</pre>
+        </div>
       </div>
-    </div>
-    <p class="muted" style="margin-top:22px">Each label must be exactly one token at the real answer boundary. The program verifies that at startup and refuses labels that tokenize any other way.</p>
-  </div>
-</section>
+    </section>
 
-<section>
-  <div class="wrap">
-    <h2>Typed answers</h2>
-    <p>Following Jev's interface shape, every question is one of three primitives. Each answer carries the full restricted distribution, so the calling code gets a value and a shape, never a sentence.</p>
+    <section aria-labelledby="speed">
+      <h2 id="speed">How 400 ms became 47 ms</h2>
+      <div class="steps">
+        <div class="step"><div><h3>Independent full prompt</h3><p>Every decision re-reads the state and question.</p></div><div class="time">~400 ms</div></div>
+        <div class="step"><div><h3>Cache the state</h3><p>Reuse the shared-state KV prefix; run only each question suffix.</p></div><div class="time">173 ms</div></div>
+        <div class="step"><div><h3>Cache the questions</h3><p>Prefill state and all questions. Decisions become two-token pointers.</p></div><div class="time">108 ms</div></div>
+        <div class="step"><div><h3>Batch single-position steps</h3><p>One row per question. No attention mask construction on the hot path.</p></div><div class="time">47 ms</div></div>
+      </div>
+    </section>
 
-    <table style="margin: 28px 0 40px">
-      <tr><th>Primitive</th><th>Question</th><th>Returns</th></tr>
-      <tr><td class="kind">noul</td><td>Is this true?</td><td>probability of yes</td></tr>
-      <tr><td class="kind">choice</td><td>Which of these options?</td><td>winning label, probabilities, confidence</td></tr>
-      <tr><td class="kind">score</td><td>Where on this scale?</td><td>fractional level, probabilities, confidence</td></tr>
-    </table>
+    <section id="proof" aria-labelledby="checks">
+      <h2 id="checks">Speed did not waive the checks</h2>
+      <div class="proof">
+        <div>
+          <h3>What held</h3>
+          <ul>
+            <li>4/4 full-prompt labelled spot-check</li>
+            <li>4/4 fast-sheet labelled spot-check</li>
+            <li>7/7 option-order rotations</li>
+            <li>5/5 deterministic distributions</li>
+            <li>All five discrete decisions unchanged</li>
+          </ul>
+        </div>
+        <div class="warning">
+          <h3>What did not</h3>
+          <ul>
+            <li>A one-token pointer reached 27 ms—and collapsed accuracy to 1/4.</li>
+            <li>Long-suffix batching was slower than serial.</li>
+            <li>Raw softmax remains uncalibrated.</li>
+            <li>The model still wrongly recommends an unchanged retry.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="failure"><strong>Not Jev.</strong> This reproduces Jev's typed interface and no-generation inference shape. It does not reproduce TypeSafe's model, RLCD training, calibration, or hosted infrastructure.</div>
+    </section>
 
-    <p class="muted" style="font-family:var(--mono);font-size:13px">STATE — cargo test; 48 passed, 1 failed; <span style="color:var(--text)">/usr/bin/ld: cannot find -lssl</span></p>
-
-    <div class="answer" style="margin-top:28px">
-      <p class="q"><span class="kind" style="font-family:var(--mono);color:var(--amber)">choice</span> &nbsp;What kind of failure is this?</p>
-      <p class="verdict">→ dependency <span class="conf">· confidence 1.00 · 8823 ms cold</span></p>
-      <div class="bar-row"><span class="label">dependency</span><span class="track"><span class="fill lead" style="width:100%"></span></span><span class="pct">100.00%</span></div>
-      <div class="bar-row"><span class="label">compilation</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-      <div class="bar-row"><span class="label">infrastructure</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-      <div class="bar-row"><span class="label">test</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-    </div>
-
-    <div class="answer">
-      <p class="q"><span style="font-family:var(--mono);color:var(--amber)">score</span> &nbsp;How risky would it be to automatically retry this exact command?</p>
-      <p class="verdict">→ 1.03 / 4 <span class="conf">· confidence 0.97 · 411 ms</span></p>
-      <div class="bar-row"><span class="label">low</span><span class="track"><span class="fill lead" style="width:97.19%"></span></span><span class="pct">97.19%</span></div>
-      <div class="bar-row"><span class="label">medium</span><span class="track"><span class="fill" style="width:2.81%"></span></span><span class="pct">2.81%</span></div>
-      <div class="bar-row"><span class="label">very low</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-      <div class="bar-row"><span class="label">high</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-      <div class="bar-row"><span class="label">very high</span><span class="track"><span class="fill" style="width:0%"></span></span><span class="pct">0.00%</span></div>
-    </div>
-
-    <p class="muted">The score is fractional, so a distribution split between two adjacent levels lands between them instead of snapping to one. Confidence is the largest probability in the restricted set — our own shape statistic, not a calibrated guarantee.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Measured, Apple M1 Pro</h2>
-    <table>
-      <tr><th>Metric</th><th>Result</th></tr>
-      <tr><td>Per decision, warm</td><td class="num">p50 401 ms · p90 414 ms · p99 419 ms</td></tr>
-      <tr><td>Five typed questions</td><td class="num">p50 2020 ms</td></tr>
-      <tr><td>Model load, warm page cache</td><td class="num">5.9 – 8.4 s</td></tr>
-      <tr><td>Determinism</td><td class="num">5/5 identical distributions</td></tr>
-      <tr><td>Option-order stability</td><td class="num">7/7 rotations held</td></tr>
-      <tr><td>Labelled failure-class check</td><td class="num">4/4</td></tr>
-      <tr><td>System One vs <code>generate()</code></td><td class="num">408 ms / 0 tokens &nbsp;vs&nbsp; 804 ms / 2 tokens</td></tr>
-    </table>
-    <p class="muted" style="margin-top:22px">The generation baseline runs the same model on the same prompt and is reported honestly: it emits only two tokens, so the gap is modest. The structural win is that there is no text to parse and the output space cannot go out of range.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>What the stress suite found</h2>
-
-    <div class="note">
-      <h3>A prompt hint was quietly breaking the model</h3>
-      <p>An earlier prompt carried a policy hint about retries. It pushed the model toward one answer and dropped option-order stability to <strong style="color:var(--red)">20%</strong> and the labelled check to 3/4. Removing it restored <strong style="color:var(--green)">100%</strong> stability and 4/4. Rotating the options is what exposed it.</p>
-    </div>
-
-    <pre>  order  failure_kind     picks: dependency, dependency, dependency, dependency  letters: BADC
-  order  retry_unchanged  picks: yes, yes                                      letters: BA
-  order  first_owner      picks: security team, security team, security team   letters: CBA
-  order  made_progress    picks: yes, yes                                      letters: BA
-  option-order stability: 7/7 rotations kept the same decision (100%)</pre>
-
-    <p class="muted">The letters move while the picks stay put — the model is tracking what the labels mean, not where they sit.</p>
-
-    <div class="note bad" style="margin-top:28px">
-      <h3>And one answer is still wrong</h3>
-      <p>The model says <strong>yes</strong>, retry the unchanged command — wrong for a deterministic missing library. Order testing confirms this is a genuine model judgment, not position bias, so it is documented rather than patched with leading prompt wording.</p>
-    </div>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Run it</h2>
-    <pre>git clone https://github.com/zozo123/gemma-to-jev
+    <section aria-labelledby="run">
+      <h2 id="run">Run the instrument</h2>
+      <pre class="terminal"><span class="command">git clone https://github.com/zozo123/gemma-to-jev
 cd gemma-to-jev
+cargo run --release</span>                 # conference demo
 
-cargo run --release                 # the demo
-cargo run --release -- --stress     # determinism, order stability, spot-check
-cargo run --release -- --baseline   # compare against real generation</pre>
-    <p class="muted" style="margin-top:18px">First run pulls ~2.3 GB of Q4_K_M weights from Hugging Face. Metal is used when available, otherwise <code>--cpu</code>.</p>
-    <a class="cta" href="https://github.com/zozo123/gemma-to-jev">View the repository →</a>
-  </div>
-</section>
+<span class="command">cargo run --release -- bench</span>        # latency + proof suite</pre>
+      <p>The first run downloads about 2.3 GB of weights. Metal is selected automatically; pass <code>--cpu</code> to force CPU.</p>
+    </section>
+  </main>
 
-<section>
-  <div class="wrap">
-    <h2>Limitations</h2>
-    <ul>
-      <li><strong>These are not calibrated probabilities.</strong> They are model-relative scores from a softmax over the legal labels. The frequent 100% readings reflect a peaked distribution, not certainty about the world.</li>
-      <li><strong>This is Jev-like, not Jev.</strong> It borrows the architectural idea and the interface shape. It does not reproduce TypeSafe's model, training, or calibration.</li>
-      <li><strong>Questions run sequentially.</strong> Candle's quantized Gemma exposes no cache reset and no ragged attention mask, so fused batching needs upstream support.</li>
-      <li><strong>Routing quality is a 4-bit 4B model's quality.</strong> It sends a missing <code>-lssl</code> to the security team, which is defensible but debatable.</li>
-    </ul>
-  </div>
-</section>
-
-<footer>
-  <div class="wrap">
-    Gemma 3 4B (Q4_K_M) · Candle · Rust · Apple Metal ·
-    <a href="https://github.com/zozo123/gemma-to-jev">github.com/zozo123/gemma-to-jev</a>
-  </div>
-</footer>
-
+  <footer>
+    <span>Gemma 3 4B · Candle · Rust · Apple Metal</span>
+    <a href="https://github.com/zozo123/gemma-to-jev">Source and methodology</a>
+  </footer>
+</div>
 </body>
 </html>

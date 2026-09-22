@@ -1,11 +1,12 @@
+mod quantized_gemma3;
 mod system_one;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::Parser;
-use system_one::{Answer, MODEL_ID, Primitive, Question, SystemOne, Value};
+use clap::{Parser, Subcommand};
+use system_one::{Answer, MODEL_ID, Primitive, Question, StateCache, SystemOne, Value};
 
 const STATE: &str = r#"Command:
 
@@ -57,37 +58,46 @@ const CORPUS: &[(&str, &str)] = &[
 #[command(about = "Gemma as a direct-logit, Jev-style System One decision function")]
 struct Args {
     /// Softmax temperature. This is an inference control, not calibration.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.0, global = true)]
     temperature: f64,
 
-    /// Repeat the typed evaluation and report warm latency percentiles.
-    #[arg(long, default_value_t = 1)]
-    repeat: usize,
-
-    /// Run the stress suite: determinism, option-order stability, spot-check.
-    #[arg(long)]
-    stress: bool,
-
-    /// Also decode an answer autoregressively to compare against System One.
-    #[arg(long)]
-    baseline: bool,
-
     /// Force CPU instead of Apple Metal.
-    #[arg(long)]
+    #[arg(long, global = true)]
     cpu: bool,
 
     /// Use an already downloaded GGUF file.
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<PathBuf>,
 
     /// Use an already downloaded tokenizer.json file.
-    #[arg(long)]
+    #[arg(long, global = true)]
     tokenizer: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Conference demo: typed answers, distributions, confidence gate.
+    Demo,
+    /// Warm latency percentiles, generation baseline, and stress suite.
+    Bench {
+        /// Warm evaluations of the five-question set after the first inference.
+        #[arg(long, default_value_t = 10)]
+        repeat: usize,
+        /// Skip the generation comparison.
+        #[arg(long)]
+        skip_baseline: bool,
+        /// Skip determinism, option-order, and labelled spot-check.
+        #[arg(long)]
+        skip_stress: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    banner();
+    let command = args.command.unwrap_or(Command::Demo);
 
     println!("Loading {MODEL_ID} (Q4_K_M)...");
     let engine = SystemOne::load(args.model.as_deref(), args.tokenizer.as_deref(), args.cpu)?;
@@ -104,9 +114,29 @@ fn main() -> Result<()> {
         .join(", ");
     println!("Answer labels verified as single tokens: {labels}\n");
 
+    match command {
+        Command::Demo => demo(&engine, args.temperature)?,
+        Command::Bench {
+            repeat,
+            skip_baseline,
+            skip_stress,
+        } => bench(
+            &engine,
+            args.temperature,
+            repeat,
+            !skip_baseline,
+            !skip_stress,
+        )?,
+    }
+    Ok(())
+}
+
+fn demo(engine: &SystemOne, temperature: f64) -> Result<()> {
+    banner();
     let questions = questions();
     let started = Instant::now();
-    let answers = engine.evaluate(STATE, &questions, args.temperature)?;
+    let mut cache = engine.prefill_sheet_batched(STATE, &questions)?;
+    let answers = engine.evaluate_sheet_batched(&mut cache, &questions, temperature)?;
     let elapsed = started.elapsed();
 
     println!("STATE\n{STATE_SUMMARY}\n");
@@ -130,22 +160,54 @@ fn main() -> Result<()> {
             text: "Which team should look at this after the first owner investigates?",
             primitive: Primitive::Choice(OWNER),
         },
-        args.temperature,
+        temperature,
     )?;
     println!("AMBIGUOUS QUESTION");
     print_answer(&ambiguous);
     println!("{}\n", gate_for(ambiguous.confidence));
+    println!("generate() calls in the System One path: 0");
+    Ok(())
+}
 
-    if args.repeat > 1 {
-        percentiles(&engine, &questions, args.temperature, args.repeat)?;
-    }
-    if args.baseline {
-        baseline(&engine)?;
-    }
-    if args.stress {
-        stress(&engine, args.temperature)?;
-    }
+fn bench(
+    engine: &SystemOne,
+    temperature: f64,
+    repeat: usize,
+    with_baseline: bool,
+    with_stress: bool,
+) -> Result<()> {
+    println!("==============================================================");
+    println!(" BENCH  ·  GEMMA 3 4B SYSTEM ONE");
+    println!("==============================================================\n");
+    println!(
+        "MODEL LOAD  {:.2} s  ({})",
+        engine.load_time.as_secs_f64(),
+        engine.device_name
+    );
 
+    let questions = questions();
+    let first_started = Instant::now();
+    let first = engine.answer(STATE, &questions[0], temperature)?;
+    let first_wall = first_started.elapsed();
+    println!("FIRST INFERENCE (includes any remaining weight residency)");
+    println!(
+        "  {} -> {} in {:.0} ms (inner forward {:.0} ms)\n",
+        first.id,
+        first.rendered_value(),
+        ms(first_wall),
+        ms(first.latency)
+    );
+
+    percentiles(engine, &questions, temperature, repeat.max(1))?;
+    batched_throughput(engine, &questions, temperature, 20)?;
+    shared_state_throughput(engine, &questions, temperature, 40)?;
+    sheet_throughput(engine, &questions, temperature, 40)?;
+    if with_baseline {
+        baseline(engine)?;
+    }
+    if with_stress {
+        stress(engine, temperature)?;
+    }
     println!("generate() calls in the System One path: 0");
     Ok(())
 }
@@ -251,13 +313,218 @@ fn percentiles(
         batches.push(started.elapsed());
         singles.extend(answers.iter().map(|answer| answer.latency));
     }
-    println!(
-        "LATENCY ({repeat} warm evaluations, {} decisions)",
-        singles.len()
-    );
+    println!("WARM 5-QUESTION EVAL ({repeat} runs, shared-state prefill included)");
     report("  per evaluation", &mut batches);
-    report("  per decision  ", &mut singles);
+    report("  per suffix    ", &mut singles);
+    let mean_eval = batches.iter().map(|d| d.as_secs_f64()).sum::<f64>() / batches.len() as f64;
+    println!(
+        "  amortized     {:.1} decisions/s  (5 questions / eval wall)\n",
+        questions.len() as f64 / mean_eval
+    );
+    Ok(())
+}
+
+/// State *and* questions prefilled once, so each decision is a two-token
+/// pointer. This is the sub-100 ms path.
+fn sheet_throughput(
+    engine: &SystemOne,
+    questions: &[Question<'_>],
+    temperature: f64,
+    count: usize,
+) -> Result<()> {
+    let mut cache = engine.prefill_sheet(STATE, questions)?;
+    let sheet = (0..questions.len())
+        .map(|index| engine.answer_from_sheet(&mut cache, questions, index, temperature))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Same decisions, independently computed from the full single-question prompt.
+    let mut agree = 0usize;
+    let mut drift = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let full = engine.answer(STATE, question, temperature)?;
+        if full.rendered_value() == sheet[index].rendered_value() {
+            agree += 1;
+        } else {
+            drift.push(format!(
+                "{}: full={} sheet={}",
+                question.id,
+                full.rendered_value(),
+                sheet[index].rendered_value()
+            ));
+        }
+    }
+
+    let mut latencies = Vec::with_capacity(count);
+    let started = Instant::now();
+    for i in 0..count {
+        let answer =
+            engine.answer_from_sheet(&mut cache, questions, i % questions.len(), temperature)?;
+        latencies.push(answer.latency);
+    }
+    let wall = started.elapsed();
+    let rate = count as f64 / wall.as_secs_f64();
+
+    let mut batch_cache = engine.prefill_sheet_batched(STATE, questions)?;
+    let batch_answers = engine.evaluate_sheet_batched(&mut batch_cache, questions, temperature)?;
+    let mut batch_agree = 0usize;
+    let mut batch_drift = Vec::new();
+    for (batched, serial) in batch_answers.iter().zip(&sheet) {
+        if batched.rendered_value() == serial.rendered_value() {
+            batch_agree += 1;
+        } else {
+            batch_drift.push(format!(
+                "{}: serial={} batched={}",
+                serial.id,
+                serial.rendered_value(),
+                batched.rendered_value()
+            ));
+        }
+    }
+
+    let rounds = count / questions.len();
+    let mut batch_latencies = Vec::with_capacity(rounds);
+    let batch_started = Instant::now();
+    for _ in 0..rounds {
+        let answers = engine.evaluate_sheet_batched(&mut batch_cache, questions, temperature)?;
+        assert_eq!(answers.len(), questions.len());
+        batch_latencies.push(answers[0].latency);
+    }
+    let batch_wall = batch_started.elapsed();
+    let batch_decisions = rounds * questions.len();
+    let batch_rate = batch_decisions as f64 / batch_wall.as_secs_f64();
+
+    println!("PREFILLED SHEET (state + all questions cached, 2-token decisions)");
+    println!(
+        "  prefix tokens {} · prefill {:.0} ms",
+        cache.prefix_tokens,
+        ms(cache.prefill_time)
+    );
+    println!(
+        "  agrees with full-prompt decisions: {agree}/{}",
+        questions.len()
+    );
+    for line in &drift {
+        println!("    drift {line}");
+    }
+    // `report` sorts in place, so the median is available afterwards.
+    report("  serial        ", &mut latencies);
+    println!(
+        "  wall {count} decisions in {:.2}s · {rate:.1} decisions/s",
+        wall.as_secs_f64()
+    );
+
+    report("  batched       ", &mut batch_latencies);
+    let per_decision = ms(batch_wall) / batch_decisions as f64;
+    println!(
+        "  agrees with serial sheet: {batch_agree}/{}",
+        questions.len()
+    );
+    for line in &batch_drift {
+        println!("    drift {line}");
+    }
+    println!(
+        "  wall {batch_decisions} decisions in {:.2}s · {batch_rate:.1} decisions/s · \
+{per_decision:.0} ms per decision{}\n",
+        batch_wall.as_secs_f64(),
+        if per_decision < 100.0 {
+            "  (SUB-100 ms)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn shared_state_throughput(
+    engine: &SystemOne,
+    questions: &[Question<'_>],
+    temperature: f64,
+    count: usize,
+) -> Result<()> {
+    let mut cache = engine.prefill(STATE)?;
+    // Warm the suffix path so residency is not in the timed window.
+    for question in questions {
+        let _ = engine.answer_cached(&mut cache, question, temperature)?;
+    }
+
+    let mut latencies = Vec::with_capacity(count);
+    let started = Instant::now();
+    for i in 0..count {
+        let answer =
+            engine.answer_cached(&mut cache, &questions[i % questions.len()], temperature)?;
+        latencies.push(answer.latency);
+    }
+    let wall = started.elapsed();
+    let rate = count as f64 / wall.as_secs_f64();
+
+    println!("SHARED-STATE FAN-OUT (one prefill, then question suffixes)");
+    println!(
+        "  prefix tokens {} · prefill {:.0} ms",
+        cache.prefix_tokens,
+        ms(cache.prefill_time)
+    );
+    report("  suffix        ", &mut latencies);
+    println!(
+        "  wall {count} decisions in {:.2}s · {:.1} decisions/s{}",
+        wall.as_secs_f64(),
+        rate,
+        if rate >= 10.0 {
+            "  (hit 10/s)"
+        } else {
+            "  (below 10/s)"
+        }
+    );
     println!();
+    Ok(())
+}
+
+fn batched_throughput(
+    engine: &SystemOne,
+    questions: &[Question<'_>],
+    temperature: f64,
+    repeat: usize,
+) -> Result<()> {
+    let mut serial_cache = engine.prefill(STATE)?;
+    let serial = questions
+        .iter()
+        .map(|question| engine.answer_cached(&mut serial_cache, question, temperature))
+        .collect::<Result<Vec<_>>>()?;
+    let mut batch_cache = engine.prefill_batched(STATE, questions.len())?;
+    let batched = engine.evaluate_batched_cached(&mut batch_cache, questions, temperature)?;
+
+    let mut max_delta = 0.0f32;
+    for (serial, batched) in serial.iter().zip(&batched) {
+        assert_eq!(
+            serial.rendered_value(),
+            batched.rendered_value(),
+            "batched decision changed for {}",
+            serial.id
+        );
+        for ((_, left), (_, right)) in serial.probabilities.iter().zip(&batched.probabilities) {
+            max_delta = max_delta.max((left - right).abs());
+        }
+    }
+
+    let mut batches = Vec::with_capacity(repeat);
+    for _ in 0..repeat {
+        let started = Instant::now();
+        let answers = engine.evaluate_batched_cached(&mut batch_cache, questions, temperature)?;
+        assert_eq!(answers.len(), questions.len());
+        batches.push(started.elapsed());
+    }
+    let total = batches.iter().copied().sum::<Duration>();
+    let decisions = repeat * questions.len();
+    let throughput = decisions as f64 / total.as_secs_f64();
+    let mut per_decision = batches
+        .iter()
+        .map(|duration| *duration / questions.len() as u32)
+        .collect::<Vec<_>>();
+
+    println!("BATCHED SUFFIXES ({repeat} batches, {decisions} decisions)");
+    println!("  serial equivalence: exact picks · max probability delta {max_delta:.2e}");
+    report("  per batch     ", &mut batches);
+    report("  per decision  ", &mut per_decision);
+    println!("  throughput: {throughput:.1} decisions/s\n");
     Ok(())
 }
 
@@ -321,13 +588,48 @@ fn stress(engine: &SystemOne, temperature: f64) -> Result<()> {
     }
     println!("  labelled accuracy: {correct}/{}\n", CORPUS.len());
 
+    // 1b. The same spot-check through the fast prefilled-sheet path, so speed
+    //     is never bought with accuracy.
+    let sheet_questions = questions();
+    let mut sheet_correct = 0usize;
+    for (state, expected) in CORPUS {
+        let mut sheet_cache = engine.prefill_sheet_batched(state, &sheet_questions)?;
+        let answers =
+            engine.evaluate_sheet_batched(&mut sheet_cache, &sheet_questions, temperature)?;
+        decisions += sheet_questions.len();
+        let selected = answers[0].rendered_value();
+        if selected == *expected {
+            sheet_correct += 1;
+        }
+        println!(
+            "  sheet       {:<14} expected {:<14} got {:<14} {}",
+            state.split('\n').next().unwrap_or(state),
+            expected,
+            selected,
+            if selected == *expected { "ok" } else { "MISS" }
+        );
+    }
+    println!(
+        "  sheet labelled accuracy: {sheet_correct}/{}\n",
+        CORPUS.len()
+    );
+
     // 2. Determinism: the same call must return the same distribution.
+    let mut cache = engine.prefill(STATE)?;
     let mut identical = 0usize;
     for _ in 0..5 {
-        let (first, first_latency) =
-            engine.label_probabilities(STATE, questions()[0].text, FAILURE, temperature)?;
-        let (second, second_latency) =
-            engine.label_probabilities(STATE, questions()[0].text, FAILURE, temperature)?;
+        let (first, first_latency) = engine.label_probabilities_cached(
+            &mut cache,
+            questions()[0].text,
+            FAILURE,
+            temperature,
+        )?;
+        let (second, second_latency) = engine.label_probabilities_cached(
+            &mut cache,
+            questions()[0].text,
+            FAILURE,
+            temperature,
+        )?;
         decisions += 2;
         latencies.push(first_latency);
         latencies.push(second_latency);
@@ -359,7 +661,8 @@ fn stress(engine: &SystemOne, temperature: f64) -> Result<()> {
                 .take(labels.len())
                 .copied()
                 .collect();
-            let (pick, index) = argmax_label(engine, &rotated, question.text, temperature)?;
+            let (pick, index) =
+                argmax_label(engine, &mut cache, &rotated, question.text, temperature)?;
             decisions += 1;
             letters.push((b'A' + index as u8) as char);
             picks.push(pick);
@@ -395,11 +698,13 @@ fn stress(engine: &SystemOne, temperature: f64) -> Result<()> {
 
 fn argmax_label(
     engine: &SystemOne,
+    cache: &mut StateCache,
     labels: &[&str],
     question: &str,
     temperature: f64,
 ) -> Result<(String, usize)> {
-    let (probabilities, _) = engine.label_probabilities(STATE, question, labels, temperature)?;
+    let (probabilities, _) =
+        engine.label_probabilities_cached(cache, question, labels, temperature)?;
     let best = probabilities
         .iter()
         .enumerate()
