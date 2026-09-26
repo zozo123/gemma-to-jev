@@ -1,12 +1,19 @@
 # Gemma System One
 
 Turn a small Gemma into a language-conditioned decision function, in native
-Rust. This demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on Apple Metal.
+Rust — and use it as a laboratory for **semantics-preserving shared-state
+inference**. This demo uses `google/gemma-3-4b-it` (Q4_K_M) with Candle on
+Apple Metal.
 
 Project page: <https://zozo123.github.io/gemma-to-jev/>
 
-> **Measured: 47 ms per warm decision, 21.2 decisions/s, 7/7 option-order
-> stability — on an Apple M1 Pro. 58.9% on JevBench's 231 public decisions.**
+> **Measured: 47 ms per warm decision on the experimental packed-sheet path,
+> 21.2 decisions/s, 7/7 option-order stability — on an Apple M1 Pro. 58.9% on
+> JevBench's 231 public decisions.**
+>
+> The important caveat is now first-class: the packed-sheet optimization can
+> change an answer. The public API therefore defaults to an isolated
+> shared-prefix batch, while the faster sheet topology remains experimental.
 
 Instead of:
 
@@ -28,6 +35,7 @@ The decision path has no open-ended generation, generated JSON, or parser.
 cargo run --release                 # conference demo (default)
 cargo run --release -- demo
 cargo run --release -- bench        # warm latency, baseline, stress
+cargo run --release -- isolation-bench --repeat 10
 cargo run --release -- serve        # local TypeSafe-compatible API
 ```
 
@@ -43,6 +51,10 @@ cargo run --release -- --cpu demo
 ```
 
 Temperature is an inference control, not calibration.
+
+See [the landscape](docs/landscape.md) for related systems and
+[the semantic-isolation plan](docs/semantic-isolation.md) for the research
+direction.
 
 ## Use it inside an agent harness
 
@@ -85,20 +97,24 @@ Do not gate on this model's raw confidence alone: JevBench shows that it is
 overconfident. Gate only task families validated for the application, and send
 ambiguous, adversarial, long-policy, or multi-hop work to the remote model.
 
-Single-question requests use the direct logit path. Multi-question requests use
-the shared-state sheet and batched pointer path automatically.
+Single-question requests use the direct logit path. Multi-question API requests
+share only the state prefix and evaluate each question in an isolated batch row.
+The packed question-sheet/pointer path is retained for experiments because it is
+faster but has already shown semantic drift on the demo workload.
 
 ## Result at a glance
 
 ```text
-full prompt                  ~400 ms / decision
-shared-state KV cache          173 ms / decision
-state + question sheet cache   108 ms / decision
-batched 2-token pointers        47 ms / decision  ← 21.2 decisions/s
+full prompt                         ~400 ms / decision
+shared-state KV cache                 173 ms / decision
+state + question sheet cache          108 ms / decision  [experimental]
+batched 2-token sheet pointers         47 ms / decision  [experimental]
 ```
 
 The 47 ms path is not a cherry-picked smaller model. It is the same quantized
-Gemma 3 4B, and `bench` checks its decisions against the slow path every run.
+Gemma 3 4B. But it is also **not semantically equivalent by assumption**:
+`bench` exposes disagreements against the independent/full-prompt path, and
+`isolation-bench` compares all execution topologies explicitly.
 
 ## Question primitives
 
@@ -145,6 +161,83 @@ state + question + runtime labels
 Each label must be exactly one token at the real answer boundary. The program
 verifies this at startup and refuses labels that tokenize any other way.
 
+## Semantic isolation is now the research question
+
+The basic restricted-logit trick is easy to reproduce with many open models.
+The harder systems problem is to reuse one expensive state across many
+runtime-defined questions **without changing what each question means**.
+
+Reference execution asks each question independently:
+
+```text
+state + Q1 -> P1
+state + Q2 -> P2
+state + Q3 -> P3
+```
+
+The production multi-question path shares only the state computation:
+
+```text
+             shared state KV
+             /      |      \
+           Q1       Q2      Q3
+           |        |       |
+          P1       P2      P3
+```
+
+The experimental sheet path instead puts every question in one context and then
+uses tiny answer pointers. That can be faster, but the conditioning function is
+different:
+
+```text
+P_sheet(y_i) = P(y_i | state, Q1, Q2, ..., Qn, pointer_i)
+```
+
+rather than:
+
+```text
+P_ref(y_i) = P(y_i | state, Qi)
+```
+
+On the existing demo, `retry_risk` changed materially between these paths.
+That failure is useful: optimization should be evaluated as a
+**latency/throughput vs semantic-drift frontier**, not by speed alone.
+
+Run:
+
+```bash
+cargo run --release -- isolation-bench --repeat 10
+```
+
+It reports selected-label flips, maximum probability drift, mean
+Jensen-Shannon divergence, and end-to-end latency for independent, isolated
+shared-prefix, and packed-sheet execution.
+
+## Landscape
+
+The space has already split into several distinct technical directions:
+
+| Direction | Examples | What they optimize |
+| --- | --- | --- |
+| **Purpose-trained decision models** | Jev, [Laya](https://github.com/he-jev/laya), [Kev](https://github.com/jaredpalmer/kev), [Mapika Decider](https://github.com/Mapika/decider) | train representations/readouts for bounded decisions, calibration, and sometimes explicit question isolation |
+| **Inference-time adapters** | [OpenJev](https://github.com/lookski/openjev), [SemIf](https://github.com/TheoLeeCJ/SemIf), [openjev-sglang](https://github.com/ekzhang/openjev-sglang) | reuse ordinary LMs and read restricted logits instead of generating prose |
+| **Probability quality** | [AnyJev](https://github.com/nokia-applied-research/AnyJev), Kev-style calibration | remove option/label bias and turn scores into empirically useful probabilities |
+| **Parallel answer architectures** | [djev / DiffusionGemma](https://github.com/mmastrac/djev) | make several bounded outputs native rather than sequential |
+| **Shared-state inference systems** | vLLM prefix caching, Hydragen, DeFT | amortize expensive prefixes and branch efficiently |
+| **This repo** | Gemma + Rust + Candle | measure the throughput/semantic-isolation frontier for many runtime-defined decisions over one state |
+
+The basic pattern
+
+```text
+ordinary LM -> legal option logits -> restricted softmax -> typed answer
+```
+
+is now common. The research question here is what happens **after** that:
+how much shared computation can we introduce before the optimized execution
+stops computing the same decision distribution?
+
+Full map: [docs/landscape.md](docs/landscape.md).
+
 ## Compared with Jev
 
 This repo copies Jev's **interface** (noul / choice / score, restricted softmax, no
@@ -154,23 +247,25 @@ This repo copies Jev's **interface** (noul / choice / score, restricted softmax,
 | --- | --- | --- |
 | What it is | Prompted Gemma 3 4B Q4, logits over A/B/C… | A hosted System One model trained with RLCD |
 | Output | Typed value + raw softmax over legal labels | Typed value + calibrated probabilities |
-| Many questions, one state | Prefill state + questions once, then one batched pass | Evaluate questions in parallel against one state |
+| Many questions, one state | API: shared state prefix + isolated batch rows; experimental packed-sheet path for speed studies | Evaluate questions in parallel against one state |
 | Confidence | Max probability in the restricted set | Shape statistic from a model trained to be calibrated |
 | Latency | **47 ms per decision warm**, on an M1 Pro | TypeSafe quotes ~70–500 ms end-to-end, most around 100 ms, from US West |
 | Throughput | **21 decisions/s** after one prefill | The ~100 ms figure is about 10 requests/s on their hardware |
 
-The move that matters — and the one Jev makes — is **pay for the state once**.
-Three steps got a 4B model from 2.5 to 21 decisions per second without changing
-a single decision:
+The systems opportunity is **pay for the state once**. Three experiments moved
+the 4B model from roughly 2.5 to 21 decisions/s, but they do not all preserve
+the same semantics:
 
-1. **Cache the state.** Prefill the prompt prefix once, so a question only runs
-   its own suffix. 400 ms → 173 ms per decision.
-2. **Cache the questions too.** Send state *and* the whole question list in the
-   prefill, exactly like one Jev request. A decision is then a two-token pointer
-   (`1.`, `2.`, …) at the answer boundary. 173 ms → 110 ms.
-3. **Walk the pointer one token at a time, batched.** One row per question, one
-   position per step. Single-position steps use the cheap decode path and build
-   no attention mask. 110 ms → **47 ms**.
+1. **Cache the state.** Prefill the common state once and run each question
+   suffix against that exact prefix. 400 ms → 173 ms per decision in the
+   measured serial path.
+2. **Batch isolated suffixes.** Widen the state cache to independent rows and
+   keep each question text in its own row. This is now the production API
+   topology; `isolation-bench` checks it against independent prompts.
+3. **Cache the questions too (experimental).** Put state and the whole question
+   list in one prompt, then answer via tiny pointers. This reached 108 ms serial
+   and **47 ms batched**, but changed at least one demo answer. It is therefore
+   a speed experiment, not the semantic reference.
 
 Two things that looked promising and did not work:
 
@@ -286,7 +381,21 @@ Two findings worth keeping:
 
 ## Next
 
-- calibrate on held-out decisions; current JevBench ECE is 0.402
-- fine-tune on decision data; prompting alone reaches only 58.9% public accuracy
-- a faster quantized matmul: 47 ms for one 4B pass is roughly 8x off this
-  machine's memory bandwidth, so the kernel is the remaining ceiling
+The priority is no longer "make another Jev wrapper." It is to map and then
+push the **semantic-isolation frontier**:
+
+1. expand `isolation-bench` across question counts, state lengths, order
+   permutations, distractors and public benchmark tasks;
+2. optimize the isolated shared-prefix path without relaxing the semantic
+   contract (cache reuse, suffix bucketing, branch-aware attention, better
+   kernels);
+3. add held-out calibration/debiasing experiments; current JevBench ECE is
+   0.402;
+4. compare raw final-token logits against intermediate-layer / trained decision
+   readouts;
+5. only after the text contract is stable, add shared multimodal state so one
+   image/world observation can feed many isolated decisions.
+
+Detailed plan: [docs/semantic-isolation.md](docs/semantic-isolation.md).
+
+Landscape and related work: [docs/landscape.md](docs/landscape.md).
