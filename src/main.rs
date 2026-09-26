@@ -229,7 +229,6 @@ fn bench(
     Ok(())
 }
 
-
 fn isolation_bench(engine: &SystemOne, temperature: f64, repeat: usize) -> Result<()> {
     println!("==============================================================");
     println!(" SEMANTIC ISOLATION BENCH");
@@ -246,8 +245,7 @@ fn isolation_bench(engine: &SystemOne, temperature: f64, repeat: usize) -> Resul
         .collect::<Result<Vec<_>>>()?;
 
     let mut isolated_cache = engine.prefill_batched(STATE, questions.len())?;
-    let isolated =
-        engine.evaluate_batched_cached(&mut isolated_cache, &questions, temperature)?;
+    let isolated = engine.evaluate_batched_cached(&mut isolated_cache, &questions, temperature)?;
 
     let mut sheet_cache = engine.prefill_sheet_batched(STATE, &questions)?;
     let sheet = engine.evaluate_sheet_batched(&mut sheet_cache, &questions, temperature)?;
@@ -279,11 +277,16 @@ fn isolation_bench(engine: &SystemOne, temperature: f64, repeat: usize) -> Resul
         sheet_times.push(started.elapsed());
     }
 
-    println!("\nEND-TO-END LATENCY ({repeat} runs, {} questions each)", questions.len());
+    println!(
+        "\nEND-TO-END LATENCY ({repeat} runs, {} questions each)",
+        questions.len()
+    );
     report("  independent   ", &mut independent_times);
     report("  isolated batch", &mut isolated_times);
     report("  question sheet", &mut sheet_times);
-    println!("\nThe question-sheet topology is a speed experiment, not the production API default.");
+    println!(
+        "\nThe question-sheet topology is a speed experiment, not the production API default."
+    );
     Ok(())
 }
 
