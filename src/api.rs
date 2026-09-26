@@ -99,8 +99,14 @@ fn handle(engine: &SystemOne, body: &str, temperature: f64) -> Result<Value> {
     let decisions = if questions.len() == 1 {
         vec![engine.answer(&state, &questions[0], temperature)?]
     } else {
-        let mut cache = engine.prefill_sheet_batched(&state, &questions)?;
-        engine.evaluate_sheet_batched(&mut cache, &questions, temperature)?
+        // Production API default: share only the state prefix, then evaluate each
+        // question in its own batch row. This preserves question isolation: no
+        // question text is placed in another question's context.
+        //
+        // The faster question-sheet pointer path remains available to benchmarks
+        // as an explicitly experimental topology because it can change answers.
+        let mut cache = engine.prefill_batched(&state, questions.len())?;
+        engine.evaluate_batched_cached(&mut cache, &questions, temperature)?
     };
     let elapsed_ms = started.elapsed().as_millis() as usize;
 
