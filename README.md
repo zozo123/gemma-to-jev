@@ -213,6 +213,31 @@ It reports selected-label flips, maximum probability drift, mean
 Jensen-Shannon divergence, and end-to-end latency for independent, isolated
 shared-prefix, and packed-sheet execution.
 
+## Landscape
+
+The space has already split into several distinct technical directions:
+
+| Direction | Examples | What they optimize |
+| --- | --- | --- |
+| **Purpose-trained decision models** | Jev, [Laya](https://github.com/he-jev/laya), [Kev](https://github.com/jaredpalmer/kev), [Mapika Decider](https://github.com/Mapika/decider) | train representations/readouts for bounded decisions, calibration, and sometimes explicit question isolation |
+| **Inference-time adapters** | [OpenJev](https://github.com/lookski/openjev), [SemIf](https://github.com/TheoLeeCJ/SemIf), [openjev-sglang](https://github.com/ekzhang/openjev-sglang) | reuse ordinary LMs and read restricted logits instead of generating prose |
+| **Probability quality** | [AnyJev](https://github.com/nokia-applied-research/AnyJev), Kev-style calibration | remove option/label bias and turn scores into empirically useful probabilities |
+| **Parallel answer architectures** | [djev / DiffusionGemma](https://github.com/mmastrac/djev) | make several bounded outputs native rather than sequential |
+| **Shared-state inference systems** | vLLM prefix caching, Hydragen, DeFT | amortize expensive prefixes and branch efficiently |
+| **This repo** | Gemma + Rust + Candle | measure the throughput/semantic-isolation frontier for many runtime-defined decisions over one state |
+
+The basic pattern
+
+```text
+ordinary LM -> legal option logits -> restricted softmax -> typed answer
+```
+
+is now common. The research question here is what happens **after** that:
+how much shared computation can we introduce before the optimized execution
+stops computing the same decision distribution?
+
+Full map: [docs/landscape.md](docs/landscape.md).
+
 ## Compared with Jev
 
 This repo copies Jev's **interface** (noul / choice / score, restricted softmax, no
