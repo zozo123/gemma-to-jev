@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#ecebe4">
-<title>Gemma System One — 47 ms decisions from a 4B model</title>
-<meta name="description" content="A native Rust experiment that turns Gemma 3 4B into a typed decision function: 47 ms per warm decision, 21.2 decisions/s, no generated text.">
+<title>Gemma System One — shared-state decision inference in Rust</title>
+<meta name="description" content="A native Rust lab for typed Gemma decisions, shared-state inference, and semantic isolation across many runtime-defined questions.">
 <style>
   :root {
     --paper: #ecebe4;
@@ -108,6 +108,23 @@
     background: rgba(198,59,47,.06);
   }
   .failure strong { color: var(--red); }
+  .landscape { display: grid; gap: 0; border: 1px solid var(--ink); background: var(--paper-2); }
+  .landscape-row {
+    display: grid; grid-template-columns: 170px 1.1fr 1.35fr;
+    gap: 24px; padding: 22px 24px; border-bottom: 1px solid var(--line);
+    align-items: start;
+  }
+  .landscape-row:last-child { border-bottom: 0; }
+  .landscape-row.ours { border: 3px solid var(--blue); margin: -1px; background: white; }
+  .landscape-kind { font: 700 12px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--blue); }
+  .landscape-projects { font-weight: 700; }
+  .landscape-projects a { color: var(--ink); }
+  .landscape-note { color: var(--muted); font-size: 15px; }
+  .landscape-callout {
+    margin-top: 28px; padding: 24px; background: var(--ink); color: white;
+    font: 15px/1.65 var(--mono);
+  }
+  .landscape-callout strong { color: #9eb6ff; }
   footer { padding: 38px 0 72px; display: flex; justify-content: space-between; font-size: 14px; }
   @media (max-width: 800px) {
     .page { padding: 0 20px; }
@@ -117,6 +134,7 @@
     .metric:nth-child(2) { border-right: 0; }
     .metric:nth-child(-n+2) { border-bottom: 1px solid var(--ink); }
     .pipeline, .proof { grid-template-columns: 1fr; }
+    .landscape-row { grid-template-columns: 1fr; gap: 8px; }
     .arrow { min-height: 56px; transform: rotate(90deg); }
     .step { grid-template-columns: 44px 1fr; }
     .step .time { grid-column: 2; text-align: left; }
@@ -138,6 +156,7 @@
     <div class="links">
       <a href="#method">Method</a>
       <a href="#proof">Proof</a>
+      <a href="#landscape">Landscape</a>
       <a href="#jevbench">JevBench</a>
       <a href="#sidecar">Sidecar</a>
       <a href="https://github.com/zozo123/gemma-to-jev">GitHub</a>
@@ -232,6 +251,53 @@ softmax → typed decision</pre>
         </div>
       </div>
       <div class="failure"><strong>Not Jev.</strong> This reproduces Jev's typed interface and no-generation inference shape. It does not reproduce TypeSafe's model, RLCD training, calibration, or hosted infrastructure.</div>
+    </section>
+
+    <section id="landscape" aria-labelledby="landscape-title">
+      <h2 id="landscape-title">This is now an ecosystem, not one trick.</h2>
+      <p>The easy part has become reproducible: many projects can turn a language model into a bounded decision function. The frontier is separating <strong>model quality</strong>, <strong>probability quality</strong>, and <strong>shared-state execution</strong>.</p>
+
+      <div class="landscape">
+        <div class="landscape-row">
+          <div class="landscape-kind">trained decision models</div>
+          <div class="landscape-projects"><a href="https://typesafe.ai/">Jev</a> · <a href="https://github.com/he-jev/laya">Laya</a> · <a href="https://github.com/jaredpalmer/kev">Kev</a> · <a href="https://github.com/Mapika/decider">Mapika Decider</a></div>
+          <div class="landscape-note">Train the representation/readout for decisions instead of leaving a chat model unchanged. This is where calibration, generalization, and explicit question isolation can become model properties.</div>
+        </div>
+
+        <div class="landscape-row">
+          <div class="landscape-kind">inference adapters</div>
+          <div class="landscape-projects"><a href="https://github.com/lookski/openjev">OpenJev</a> · <a href="https://github.com/TheoLeeCJ/SemIf">SemIf</a> · <a href="https://github.com/ekzhang/openjev-sglang">openjev-sglang</a></div>
+          <div class="landscape-note">Reuse ordinary LMs, restrict the answer space, and read logits instead of prose. This establishes that “stop generating and choose” is useful engineering, but no longer sufficient novelty by itself.</div>
+        </div>
+
+        <div class="landscape-row">
+          <div class="landscape-kind">probability quality</div>
+          <div class="landscape-projects"><a href="https://github.com/nokia-applied-research/AnyJev">AnyJev</a> · Kev · trained Decider/Jev-style systems</div>
+          <div class="landscape-note">Debias option/label effects, fit calibration, or train calibrated heads. Raw restricted softmax is a model-relative score until evidence shows otherwise.</div>
+        </div>
+
+        <div class="landscape-row">
+          <div class="landscape-kind">parallel architectures</div>
+          <div class="landscape-projects"><a href="https://github.com/mmastrac/djev">djev / DiffusionGemma</a></div>
+          <div class="landscape-note">Use diffusion-style answer slots rather than ordinary autoregressive continuation, making simultaneous bounded outputs a native architectural possibility.</div>
+        </div>
+
+        <div class="landscape-row">
+          <div class="landscape-kind">shared-state systems</div>
+          <div class="landscape-projects"><a href="https://docs.vllm.ai/en/latest/design/prefix_caching/">vLLM prefix caching</a> · <a href="https://arxiv.org/abs/2402.05099">Hydragen</a> · <a href="https://arxiv.org/abs/2404.00242">DeFT</a></div>
+          <div class="landscape-note">The broader inference-systems literature already asks how to reuse expensive prefixes and branch efficiently. The decision-model question adds a semantic constraint: branches must stay independent.</div>
+        </div>
+
+        <div class="landscape-row ours">
+          <div class="landscape-kind">this repo</div>
+          <div class="landscape-projects">Gemma System One · Rust · Candle · exact legal-label logits</div>
+          <div class="landscape-note"><strong>Research target:</strong> maximize many-question throughput while measuring whether optimization changes the decision distribution. The production API shares only the state prefix; the faster packed-sheet path is retained as an explicit semantic-drift experiment.</div>
+        </div>
+      </div>
+
+      <div class="landscape-callout"><strong>Current thesis:</strong> the restricted-logit trick is commodity. The harder problem is one expensive state → many runtime-defined decisions, while keeping each branch semantically isolated and its probabilities empirically trustworthy.</div>
+
+      <p>Long-form map: <a href="https://github.com/zozo123/gemma-to-jev/blob/main/docs/landscape.md">decision-model landscape</a>. Research plan: <a href="https://github.com/zozo123/gemma-to-jev/blob/main/docs/semantic-isolation.md">semantic isolation</a>.</p>
     </section>
 
     <section id="jevbench" aria-labelledby="jevbench-title">

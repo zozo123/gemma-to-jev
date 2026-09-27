@@ -100,6 +100,12 @@ enum Command {
         #[arg(long)]
         skip_stress: bool,
     },
+    /// Compare independent, isolated shared-prefix, and question-sheet execution.
+    IsolationBench {
+        /// Number of timed end-to-end evaluations per topology.
+        #[arg(long, default_value_t = 10)]
+        repeat: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -135,6 +141,9 @@ fn main() -> Result<()> {
             !skip_baseline,
             !skip_stress,
         )?,
+        Command::IsolationBench { repeat } => {
+            isolation_bench(&engine, args.temperature, repeat.max(1))?
+        }
     }
     Ok(())
 }
@@ -143,8 +152,8 @@ fn demo(engine: &SystemOne, temperature: f64) -> Result<()> {
     banner();
     let questions = questions();
     let started = Instant::now();
-    let mut cache = engine.prefill_sheet_batched(STATE, &questions)?;
-    let answers = engine.evaluate_sheet_batched(&mut cache, &questions, temperature)?;
+    let mut cache = engine.prefill_batched(STATE, questions.len())?;
+    let answers = engine.evaluate_batched_cached(&mut cache, &questions, temperature)?;
     let elapsed = started.elapsed();
 
     println!("STATE\n{STATE_SUMMARY}\n");
@@ -218,6 +227,137 @@ fn bench(
     }
     println!("generate() calls in the System One path: 0");
     Ok(())
+}
+
+fn isolation_bench(engine: &SystemOne, temperature: f64, repeat: usize) -> Result<()> {
+    println!("==============================================================");
+    println!(" SEMANTIC ISOLATION BENCH");
+    println!("==============================================================\n");
+    println!("Reference: each question is asked independently.");
+    println!("Isolated: share only the state prefix; question text stays in its own batch row.");
+    println!("Sheet: prefill state + all questions; answer with tiny pointers (experimental).\n");
+
+    let questions = questions();
+
+    let reference = questions
+        .iter()
+        .map(|question| engine.answer(STATE, question, temperature))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut isolated_cache = engine.prefill_batched(STATE, questions.len())?;
+    let isolated = engine.evaluate_batched_cached(&mut isolated_cache, &questions, temperature)?;
+
+    let mut sheet_cache = engine.prefill_sheet_batched(STATE, &questions)?;
+    let sheet = engine.evaluate_sheet_batched(&mut sheet_cache, &questions, temperature)?;
+
+    compare_topology("isolated shared-prefix", &reference, &isolated);
+    compare_topology("question sheet", &reference, &sheet);
+
+    let mut independent_times = Vec::with_capacity(repeat);
+    let mut isolated_times = Vec::with_capacity(repeat);
+    let mut sheet_times = Vec::with_capacity(repeat);
+
+    for _ in 0..repeat {
+        let started = Instant::now();
+        for question in &questions {
+            let _ = engine.answer(STATE, question, temperature)?;
+        }
+        independent_times.push(started.elapsed());
+
+        let started = Instant::now();
+        let mut cache = engine.prefill_batched(STATE, questions.len())?;
+        let answers = engine.evaluate_batched_cached(&mut cache, &questions, temperature)?;
+        assert_eq!(answers.len(), questions.len());
+        isolated_times.push(started.elapsed());
+
+        let started = Instant::now();
+        let mut cache = engine.prefill_sheet_batched(STATE, &questions)?;
+        let answers = engine.evaluate_sheet_batched(&mut cache, &questions, temperature)?;
+        assert_eq!(answers.len(), questions.len());
+        sheet_times.push(started.elapsed());
+    }
+
+    println!(
+        "\nEND-TO-END LATENCY ({repeat} runs, {} questions each)",
+        questions.len()
+    );
+    report("  independent   ", &mut independent_times);
+    report("  isolated batch", &mut isolated_times);
+    report("  question sheet", &mut sheet_times);
+    println!(
+        "\nThe question-sheet topology is a speed experiment, not the production API default."
+    );
+    Ok(())
+}
+
+fn compare_topology(name: &str, reference: &[Answer], candidate: &[Answer]) {
+    let mut flips = 0usize;
+    let mut max_probability_delta = 0.0f32;
+    let mut js_total = 0.0f64;
+
+    for (expected, observed) in reference.iter().zip(candidate) {
+        if selected_label(expected) != selected_label(observed) {
+            flips += 1;
+            println!(
+                "  flip {name}: {} reference={} candidate={}",
+                expected.id,
+                selected_label(expected),
+                selected_label(observed)
+            );
+        }
+
+        for (label, left) in &expected.probabilities {
+            if let Some((_, right)) = observed
+                .probabilities
+                .iter()
+                .find(|(candidate_label, _)| candidate_label == label)
+            {
+                max_probability_delta = max_probability_delta.max((left - right).abs());
+            }
+        }
+        js_total += js_divergence(expected, observed);
+    }
+
+    let count = reference.len().max(1);
+    println!(
+        "{name}: selected-label flips {flips}/{} · max |Δp| {:.3} · mean JS {:.6}",
+        reference.len(),
+        max_probability_delta,
+        js_total / count as f64
+    );
+}
+
+fn selected_label(answer: &Answer) -> &str {
+    answer
+        .probabilities
+        .iter()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(label, _)| label.as_str())
+        .unwrap_or("")
+}
+
+fn js_divergence(left: &Answer, right: &Answer) -> f64 {
+    let mut divergence = 0.0f64;
+    for (label, left_probability) in &left.probabilities {
+        let Some((_, right_probability)) = right
+            .probabilities
+            .iter()
+            .find(|(candidate_label, _)| candidate_label == label)
+        else {
+            continue;
+        };
+
+        let p = *left_probability as f64;
+        let q = *right_probability as f64;
+        let midpoint = 0.5 * (p + q);
+        if p > 0.0 && midpoint > 0.0 {
+            divergence += 0.5 * p * (p / midpoint).ln();
+        }
+        if q > 0.0 && midpoint > 0.0 {
+            divergence += 0.5 * q * (q / midpoint).ln();
+        }
+    }
+    divergence
 }
 
 fn questions() -> Vec<Question<'static>> {
